@@ -1,0 +1,10 @@
+[workspace]
+members = ["crates/omniterm-core", "apps/desktop/src-tauri"]
+default-members = ["crates/omniterm-core"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.79"
+version = "0.1.0"
+publish = false

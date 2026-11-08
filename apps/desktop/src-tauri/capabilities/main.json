@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-workspace",
+  "description": "Only the local main window may read the workspace snapshot.",
+  "windows": ["main"],
+  "permissions": ["allow-get-layout-snapshot"]
+}

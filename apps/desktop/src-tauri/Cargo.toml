@@ -1,0 +1,26 @@
+[package]
+name = "omniterm-desktop"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version = "1.95"
+description = "Thin native host for the Omniterm workspace prototype"
+license = "MIT"
+
+[lib]
+name = "omniterm_desktop"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[dependencies]
+omniterm-core = { path = "../../../crates/omniterm-core" }
+serde = { version = "1.0", features = ["derive"] }
+tauri = { version = "=2.12.5", features = [] }
+
+[build-dependencies]
+tauri-build = { version = "=2.7.4", features = [] }
+
+[dev-dependencies]
+serde_json = "1.0"
