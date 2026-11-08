@@ -22,6 +22,7 @@ enum Command {
     Screenshot,
     Click { x: u32, y: u32 },
     Key { key: Key },
+    Text { text: String },
     Revoke,
     Close,
 }
@@ -162,6 +163,7 @@ fn serve(
             Command::Screenshot => reply(output, screenshot(app))?,
             Command::Click { x, y } => reply(output, click(app, x, y))?,
             Command::Key { key } => reply(output, key_event(app, key))?,
+            Command::Text { text } => reply(output, insert_text(app, &text))?,
             Command::Revoke => reply(output, Ok(json!({ "revoked": true })))?,
             Command::Close => {
                 reply(output, Ok(json!({ "closing": true })))?;
@@ -187,6 +189,17 @@ fn window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, &'static str> 
 // Fixed observations only. No caller-supplied script, selector, path, URL or CDP
 // method; no test command is registered in Tauri's renderer IPC handler.
 const OBSERVE: &str = r#"(async () => {
+  const app = document.querySelector('.application');
+  const world = document.querySelector('[data-testid="world"]');
+  const bounds = element => {
+    if (!element) return null;
+    const rect = element.getBoundingClientRect();
+    return {x: rect.x, y: rect.y, width: rect.width, height: rect.height};
+  };
+  const control = id => {
+    const element = document.querySelector(`[data-testid="${id}"]`);
+    return element ? {...bounds(element), disabled: element.disabled} : null;
+  };
   // Test-host-only counters prove engine input delivery without recording text.
   if (!globalThis.__omniterm_test_events) {
     const events = { clicks: 0, key_downs: 0, click_trusted: false, key_trusted: false };
@@ -202,7 +215,22 @@ const OBSERVE: &str = r#"(async () => {
   }
   return {
   origin: location.origin,
-  rendered_revision: document.querySelector('.application')?.dataset.renderedRevision ?? null,
+  rendered_revision: app?.dataset.renderedRevision ?? null,
+  selected_id: app?.dataset.selectedBlockId || null,
+  busy: app?.dataset.busy === 'true',
+  error: document.querySelector('[data-testid="command-error"]')?.textContent?.trim().slice(0, 1024) ?? '',
+  controls: { title: control('placeholder-title'), add: control('add-placeholder'), remove: control('remove-placement') },
+  active: {test_id: document.activeElement?.dataset.testid ?? null, block_id: document.activeElement?.dataset.blockId ?? null,
+    focus_visible: document.activeElement?.matches(':focus-visible') ?? false},
+  world: world ? {width: world.offsetWidth, height: world.offsetHeight, child_count: world.children.length,
+    background_size: getComputedStyle(world).backgroundSize, background_image: getComputedStyle(world).backgroundImage} : null,
+  blocks: [...document.querySelectorAll('[data-block-id]')].slice(0, 256).map(element => ({
+    id: element.dataset.blockId, title: element.querySelector('[data-testid="block-title"]')?.textContent ?? '',
+    selected: element.getAttribute('aria-pressed') === 'true', viewport: bounds(element),
+    left: parseFloat(element.style.left), top: parseFloat(element.style.top),
+    width: parseFloat(element.style.width), height: parseFloat(element.style.height),
+    injected_elements: element.querySelectorAll('script,img,iframe,svg').length
+  })),
   status: document.querySelector('[data-testid="workspace-status"]')?.textContent?.trim().slice(0, 256) ?? null,
   block_count: document.querySelector('[data-testid="block-count"]')?.textContent?.trim().slice(0, 256) ?? null,
   grid: document.querySelector('[data-testid="grid-dimensions"]')?.textContent?.trim().slice(0, 256) ?? null,
@@ -224,10 +252,11 @@ fn inspect(app: &tauri::AppHandle) -> Result<Value, &'static str> {
     let rendered = rendered
         .pointer("/result/value")
         .ok_or("observation_failed")?;
-    let layout = omniterm_desktop::snapshot::LayoutSnapshotV1::from_workspace(
-        &app.state::<omniterm_core::Workspace>(),
-        0,
-    );
+    let layout = app
+        .state::<std::sync::Mutex<omniterm_desktop::commands::WorkspaceHost>>()
+        .lock()
+        .map_err(|_| "workspace_unavailable")?
+        .snapshot();
     let size = window.inner_size().map_err(|_| "window_unavailable")?;
     Ok(json!({ "layout": layout, "rendered": rendered, "window": {
         "title": window.title().map_err(|_| "window_unavailable")?,
@@ -255,6 +284,19 @@ fn validate_point(x: u32, y: u32, width: f64, height: f64) -> Result<(), &'stati
         return Err("point_outside_webview");
     }
     Ok(())
+}
+
+fn validate_text(text: &str) -> Result<(), &'static str> {
+    if text.len() > 256 || text.chars().any(char::is_control) {
+        return Err("invalid_text");
+    }
+    Ok(())
+}
+
+fn insert_text(app: &tauri::AppHandle, text: &str) -> Result<Value, &'static str> {
+    validate_text(text)?;
+    protocol(&window(app)?, "Input.insertText", json!({"text": text}))?;
+    Ok(json!({"text_sent": true}))
 }
 
 fn click(app: &tauri::AppHandle, x: u32, y: u32) -> Result<Value, &'static str> {
@@ -382,6 +424,15 @@ mod tests {
         assert!(validate_point(1024, 0, 1024.0, 700.0).is_err());
         assert!(validate_point(0, 700, 1024.0, 700.0).is_err());
         assert!(validate_point(u32::MAX, 0, 1024.0, 700.0).is_err());
+    }
+
+    #[test]
+    fn title_entry_is_bounded_and_does_not_allow_control_text() {
+        assert!(validate_text("<img src=x>").is_ok());
+        assert!(validate_text(&"é".repeat(128)).is_ok());
+        assert!(validate_text(&"é".repeat(129)).is_err());
+        assert!(validate_text("hidden\0value").is_err());
+        assert!(validate_text("two\nlines").is_err());
     }
 
     #[test]

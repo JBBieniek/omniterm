@@ -71,10 +71,13 @@ try {
     assert.deepEqual(await app.request('execute'), { error: 'invalid_request' });
     check('unauthorized_missing_extra_unknown_rejected');
     const state = await inspectReady(app);
-    assert.deepEqual(state.layout, { api_version: 1, revision: '0', grid: { columns: 48, rows: 32, cell_px: 64 }, blocks: [] });
+    assert.deepEqual(state.layout, { api_version: 1, revision: '0', grid: { columns: 48, rows: 32, cell_px: 64 }, blocks: [
+      {id: '1', title: 'Placeholder 1', rect: {x:0,y:0,width:12,height:8}},
+      {id: '2', title: 'Placeholder 2', rect: {x:12,y:0,width:8,height:8}},
+    ] });
     assert.equal(state.rendered.rendered_revision, state.layout.revision);
     assert.match(state.rendered.status, /Workspace loaded/);
-    assert.equal(state.rendered.block_count, '0 blocks');
+    assert.equal(state.rendered.block_count, '2 blocks');
     assert.equal(state.rendered.grid, '48 columns × 32 rows');
     assert.equal(state.rendered.cell, '64 px / cell');
     assert.equal(state.rendered.test_command_rejected, true);
@@ -92,6 +95,8 @@ try {
     check('native_webview_screenshot', { bytes: png.length, width: png.readUInt32BE(16), height: png.readUInt32BE(20) });
     assert.deepEqual(await app.request({ click: { x: state.window.width, y: 0 } }), { error: 'point_outside_webview' });
     assert.deepEqual(await app.request({ click: { x: 100, y: 100 } }, 'wrong'), { error: 'unauthorized' });
+    assert.deepEqual(await app.request({ text: { text: 'unauthorized' } }, 'wrong'), { error: 'unauthorized' });
+    assert.deepEqual(await app.request({ text: { text: 'x'.repeat(257) } }), { error: 'invalid_text' });
     assert.deepEqual(await app.request({ key: { key: 'host_shortcut' } }), { error: 'invalid_request' });
     assert.deepEqual(await app.request({ click: { x: 100, y: 100 } }), { result: { clicked: true } });
     assert.deepEqual(await app.request({ key: { key: 'tab' } }), { result: { key_sent: true } });
@@ -110,6 +115,7 @@ try {
     assert.deepEqual(await app.request('inspect'), { error: 'unauthorized' });
     assert.deepEqual(await app.request('close'), { error: 'unauthorized' });
     assert.deepEqual(await app.request({ click: { x: 1, y: 1 } }), { error: 'unauthorized' });
+    assert.deepEqual(await app.request({ text: { text: 'revoked' } }), { error: 'unauthorized' });
     check('revocation_denies_inspection_and_close');
     await app.stop(); // Revoked session cannot close; runner owns this child.
     app = await launchAutomation(binary);

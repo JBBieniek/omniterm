@@ -18,6 +18,12 @@ impl From<WireU64> for String {
     }
 }
 
+impl From<WireU64> for u64 {
+    fn from(value: WireU64) -> Self {
+        value.0
+    }
+}
+
 impl TryFrom<String> for WireU64 {
     type Error = &'static str;
 

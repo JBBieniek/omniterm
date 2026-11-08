@@ -9,7 +9,6 @@ license = "MIT"
 
 [target.'cfg(windows)'.dependencies]
 omniterm-desktop = { path = "../../apps/desktop/src-tauri" }
-omniterm-core = { path = "../../crates/omniterm-core" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tauri = { version = "=2.12.5", features = [] }

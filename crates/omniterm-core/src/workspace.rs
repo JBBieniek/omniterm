@@ -79,6 +79,24 @@ impl Workspace {
         self.blocks.get(&id)
     }
 
+    /// First available rectangle, scanning rows before columns; no reflow.
+    pub fn first_fit(&self, width: u32, height: u32) -> Option<GridRect> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let last_x = self.grid.columns().checked_sub(width)?;
+        let last_y = self.grid.rows().checked_sub(height)?;
+        for y in 0..=last_y {
+            for x in 0..=last_x {
+                let rect = GridRect::new(x, y, width, height).ok()?;
+                if self.validate_rect(rect, None).is_ok() {
+                    return Some(rect);
+                }
+            }
+        }
+        None
+    }
+
     pub fn add(&mut self, block: Block) -> Result<(), LayoutError> {
         if self.blocks.contains_key(&block.id) {
             return Err(LayoutError::DuplicateId);

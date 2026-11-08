@@ -2058,7 +2058,6 @@ dependencies = [
 name = "omniterm-test-host"
 version = "0.1.0"
 dependencies = [
- "omniterm-core",
  "omniterm-desktop",
  "serde",
  "serde_json",
