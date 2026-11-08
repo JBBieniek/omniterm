@@ -20,9 +20,30 @@ const MAX_RESPONSE: usize = 8 * 1024 * 1024;
 enum Command {
     Inspect,
     Screenshot,
-    Click { x: u32, y: u32 },
-    Key { key: Key },
-    Text { text: String },
+    Click {
+        x: u32,
+        y: u32,
+    },
+    Pointer {
+        phase: PointerPhase,
+        button: PointerButton,
+        x: u32,
+        y: u32,
+    },
+    Resize {
+        width: u32,
+        height: u32,
+    },
+    ShortcutGuards,
+    CancelPan {
+        lost_capture: bool,
+    },
+    Key {
+        key: Key,
+    },
+    Text {
+        text: String,
+    },
     Revoke,
     Close,
 }
@@ -33,6 +54,27 @@ enum Key {
     Tab,
     Enter,
     Escape,
+    ZoomIn,
+    ZoomPlus,
+    ZoomOut,
+    ZoomReset,
+    NumpadAdd,
+    NumpadSubtract,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum PointerPhase {
+    Down,
+    Move,
+    Up,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum PointerButton {
+    Left,
+    Middle,
 }
 
 #[derive(Deserialize)]
@@ -162,6 +204,15 @@ fn serve(
             Command::Inspect => reply(output, inspect(app))?,
             Command::Screenshot => reply(output, screenshot(app))?,
             Command::Click { x, y } => reply(output, click(app, x, y))?,
+            Command::Pointer {
+                phase,
+                button,
+                x,
+                y,
+            } => reply(output, pointer(app, phase, button, x, y))?,
+            Command::Resize { width, height } => reply(output, resize(app, width, height))?,
+            Command::ShortcutGuards => reply(output, shortcut_guards(app))?,
+            Command::CancelPan { lost_capture } => reply(output, cancel_pan(app, lost_capture))?,
             Command::Key { key } => reply(output, key_event(app, key))?,
             Command::Text { text } => reply(output, insert_text(app, &text))?,
             Command::Revoke => reply(output, Ok(json!({ "revoked": true })))?,
@@ -191,6 +242,8 @@ fn window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, &'static str> 
 const OBSERVE: &str = r#"(async () => {
   const app = document.querySelector('.application');
   const world = document.querySelector('[data-testid="world"]');
+  const viewport = document.querySelector('.board-viewport');
+  const matrix = world ? new DOMMatrix(getComputedStyle(world).transform) : null;
   const bounds = element => {
     if (!element) return null;
     const rect = element.getBoundingClientRect();
@@ -219,7 +272,13 @@ const OBSERVE: &str = r#"(async () => {
   selected_id: app?.dataset.selectedBlockId || null,
   busy: app?.dataset.busy === 'true',
   error: document.querySelector('[data-testid="command-error"]')?.textContent?.trim().slice(0, 1024) ?? '',
-  controls: { title: control('placeholder-title'), add: control('add-placeholder'), remove: control('remove-placement') },
+  controls: { title: control('placeholder-title'), add: control('add-placeholder'), remove: control('remove-placement'),
+    pan: control('pan-tool'), zoom_in: control('zoom-in'), zoom_out: control('zoom-out'), reset: control('reset-view') },
+  camera: matrix ? {zoom: matrix.a * 100, origin: {x: -matrix.e / matrix.a, y: -matrix.f / matrix.d}} : null,
+  viewport: viewport ? {...bounds(viewport), scroll_x: viewport.scrollLeft, scroll_y: viewport.scrollTop} : null,
+  page: {dpr: devicePixelRatio, scale: visualViewport?.scale, toolbar: bounds(document.querySelector('.toolbar'))},
+  pan_tool: document.querySelector('[data-testid="pan-tool"]')?.getAttribute('aria-pressed') === 'true',
+  panning: viewport?.classList.contains('panning') ?? false,
   active: {test_id: document.activeElement?.dataset.testid ?? null, block_id: document.activeElement?.dataset.blockId ?? null,
     focus_visible: document.activeElement?.matches(':focus-visible') ?? false},
   world: world ? {width: world.offsetWidth, height: world.offsetHeight, child_count: world.children.length,
@@ -320,22 +379,128 @@ fn click(app: &tauri::AppHandle, x: u32, y: u32) -> Result<Value, &'static str> 
 
 fn key_event(app: &tauri::AppHandle, key: Key) -> Result<Value, &'static str> {
     let window = window(app)?;
-    let (name, code) = match key {
-        Key::Tab => ("Tab", 9),
-        Key::Enter => ("Enter", 13),
-        Key::Escape => ("Escape", 27),
+    let (name, code, virtual_key, modifiers, location) = match key {
+        Key::Tab => ("Tab", "Tab", 9, 0, 0),
+        Key::Enter => ("Enter", "Enter", 13, 0, 0),
+        Key::Escape => ("Escape", "Escape", 27, 0, 0),
+        Key::ZoomIn => ("=", "Equal", 187, 2, 0),
+        Key::ZoomPlus => ("+", "Equal", 187, 10, 0),
+        Key::ZoomOut => ("-", "Minus", 189, 2, 0),
+        Key::ZoomReset => ("0", "Digit0", 48, 2, 0),
+        Key::NumpadAdd => ("+", "NumpadAdd", 107, 2, 3),
+        Key::NumpadSubtract => ("-", "NumpadSubtract", 109, 2, 3),
     };
     for event in ["keyDown", "keyUp"] {
         protocol(
             &window,
             "Input.dispatchKeyEvent",
             json!({
-                "type": event, "key": name, "code": name,
-                "windowsVirtualKeyCode": code, "nativeVirtualKeyCode": code
+                "type": event, "key": name, "code": code, "modifiers": modifiers,
+                "location": location, "isKeypad": location == 3,
+                "windowsVirtualKeyCode": virtual_key, "nativeVirtualKeyCode": virtual_key
             }),
         )?;
     }
     Ok(json!({ "key_sent": true }))
+}
+
+fn pointer(
+    app: &tauri::AppHandle,
+    phase: PointerPhase,
+    button: PointerButton,
+    x: u32,
+    y: u32,
+) -> Result<Value, &'static str> {
+    let window = window(app)?;
+    let size = window
+        .inner_size()
+        .map_err(|_| "window_unavailable")?
+        .to_logical::<f64>(window.scale_factor().map_err(|_| "window_unavailable")?);
+    validate_point(x, y, size.width, size.height)?;
+    let event = match phase {
+        PointerPhase::Down => "mousePressed",
+        PointerPhase::Move => "mouseMoved",
+        PointerPhase::Up => "mouseReleased",
+    };
+    let (name, held) = match button {
+        PointerButton::Left => ("left", 1),
+        PointerButton::Middle => ("middle", 4),
+    };
+    protocol(
+        &window,
+        "Input.dispatchMouseEvent",
+        json!({
+            "type": event, "x": x, "y": y, "button": name,
+            "buttons": if phase == PointerPhase::Up {0} else {held}, "clickCount": 1
+        }),
+    )?;
+    Ok(json!({"pointer_sent": true}))
+}
+
+fn validate_size(width: u32, height: u32) -> Result<(), &'static str> {
+    if !(360..=1920).contains(&width) || !(300..=1080).contains(&height) {
+        return Err("invalid_window_size");
+    }
+    Ok(())
+}
+
+// Fixed synthetic integration probes, distinct from native engine input. They
+// test DOM guards/cancellation, not physical IME, OS dialogs or device capture.
+fn shortcut_guards(app: &tauri::AppHandle) -> Result<Value, &'static str> {
+    let result = protocol(
+        &window(app)?,
+        "Runtime.evaluate",
+        json!({
+            "expression": r#"(async () => {
+          const world = document.querySelector('[data-testid="world"]');
+          const before = getComputedStyle(world).transform;
+          const fire = extra => {
+            const event = new KeyboardEvent('keydown', {key:'+',code:'Equal',ctrlKey:true,cancelable:true,...extra});
+            window.dispatchEvent(event);
+            return event.defaultPrevented;
+          };
+          window.dispatchEvent(new CompositionEvent('compositionstart'));
+          const composing = fire({});
+          window.dispatchEvent(new CompositionEvent('compositionend'));
+          const event_composing = fire({isComposing:true});
+          const dialog = document.createElement('dialog');
+          document.body.append(dialog);
+          dialog.showModal();
+          let modal;
+          try { modal = fire({}); } finally { dialog.close(); dialog.remove(); }
+          await new Promise(requestAnimationFrame);
+          return {synthetic:true, composing, event_composing, modal,
+            unchanged: getComputedStyle(world).transform === before};
+        })()"#,
+            "awaitPromise": true, "returnByValue": true
+        }),
+    )?;
+    result
+        .pointer("/result/value")
+        .cloned()
+        .ok_or("observation_failed")
+}
+
+fn cancel_pan(app: &tauri::AppHandle, lost_capture: bool) -> Result<Value, &'static str> {
+    let expression = if lost_capture {
+        r#"(() => { const viewport = document.querySelector('.board-viewport'); viewport.dispatchEvent(new PointerEvent('lostpointercapture')); return {synthetic:true}; })()"#
+    } else {
+        r#"(() => { const viewport = document.querySelector('.board-viewport'); viewport.dispatchEvent(new PointerEvent('pointercancel')); return {synthetic:true}; })()"#
+    };
+    protocol(
+        &window(app)?,
+        "Runtime.evaluate",
+        json!({"expression":expression, "returnByValue":true}),
+    )?;
+    Ok(json!({"synthetic":true}))
+}
+
+fn resize(app: &tauri::AppHandle, width: u32, height: u32) -> Result<Value, &'static str> {
+    validate_size(width, height)?;
+    window(app)?
+        .set_size(tauri::LogicalSize::new(width, height))
+        .map_err(|_| "resize_failed")?;
+    Ok(json!({"resized": true}))
 }
 
 fn protocol(
@@ -433,6 +598,33 @@ mod tests {
         assert!(validate_text(&"é".repeat(129)).is_err());
         assert!(validate_text("hidden\0value").is_err());
         assert!(validate_text("two\nlines").is_err());
+    }
+
+    #[test]
+    fn camera_steering_has_bounded_sizes_and_fixed_operations() {
+        let mut session =
+            Session::from_hello(format!(r#"{{"hello":"{TOKEN}"}}"#).as_bytes()).unwrap();
+        for command in [
+            r#"{"pointer":{"phase":"move","button":"right","x":1,"y":2}}"#,
+            r#"{"pointer":{"phase":"wheel","button":"left","x":1,"y":2}}"#,
+            r#"{"key":{"key":"zoom_in","script":"bad"}}"#,
+            r#"{"resize":{"width":360,"height":300,"window":"other"}}"#,
+        ] {
+            assert!(session
+                .authorize(format!(r#"{{"token":"{TOKEN}","command":{command}}}"#).as_bytes())
+                .is_err());
+        }
+        assert!(validate_size(360, 300).is_ok());
+        assert!(validate_size(1920, 1080).is_ok());
+        for (width, height) in [
+            (359, 300),
+            (360, 299),
+            (1921, 300),
+            (360, 1081),
+            (u32::MAX, u32::MAX),
+        ] {
+            assert!(validate_size(width, height).is_err());
+        }
     }
 
     #[test]

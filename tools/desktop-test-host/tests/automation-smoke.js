@@ -17,6 +17,11 @@ const evidence = {
 };
 const check = (name, detail = {}) => evidence.checks.push({ name, result: 'PASS', ...detail });
 let app;
+const cameraCommands = [
+  {pointer:{phase:'move',button:'left',x:10,y:10}},
+  {resize:{width:640,height:480}}, {key:{key:'zoom_in'}},
+  'shortcut_guards', {cancel_pan:{lost_capture:true}},
+];
 try {
   if (mode === 'excluded') {
     // Production has no automation entry point: even its former flag and a
@@ -96,6 +101,7 @@ try {
     assert.deepEqual(await app.request({ click: { x: state.window.width, y: 0 } }), { error: 'point_outside_webview' });
     assert.deepEqual(await app.request({ click: { x: 100, y: 100 } }, 'wrong'), { error: 'unauthorized' });
     assert.deepEqual(await app.request({ text: { text: 'unauthorized' } }, 'wrong'), { error: 'unauthorized' });
+    for (const command of cameraCommands) assert.deepEqual(await app.request(command, 'wrong'), {error:'unauthorized'});
     assert.deepEqual(await app.request({ text: { text: 'x'.repeat(257) } }), { error: 'invalid_text' });
     assert.deepEqual(await app.request({ key: { key: 'host_shortcut' } }), { error: 'invalid_request' });
     assert.deepEqual(await app.request({ click: { x: 100, y: 100 } }), { result: { clicked: true } });
@@ -116,6 +122,7 @@ try {
     assert.deepEqual(await app.request('close'), { error: 'unauthorized' });
     assert.deepEqual(await app.request({ click: { x: 1, y: 1 } }), { error: 'unauthorized' });
     assert.deepEqual(await app.request({ text: { text: 'revoked' } }), { error: 'unauthorized' });
+    for (const command of cameraCommands) assert.deepEqual(await app.request(command), {error:'unauthorized'});
     check('revocation_denies_inspection_and_close');
     await app.stop(); // Revoked session cannot close; runner owns this child.
     app = await launchAutomation(binary);

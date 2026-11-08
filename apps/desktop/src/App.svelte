@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { panScreen, stepZoom, viewportPoint, zoomAt, zoomShortcut } from './camera';
+  import type { Camera, Point } from './camera';
 
   type LayoutSnapshotV1 = {
     api_version: 1;
@@ -24,7 +26,66 @@
   let needsReload = $state(false);
   let error = $state('');
   let addButton: HTMLButtonElement;
+  let viewport: HTMLElement;
+  let camera = $state<Camera>({origin: {x: 0, y: 0}, zoom: 100});
+  let panTool = $state(false);
+  let pan = $state<{pointerId: number; start: Point; camera: Camera} | null>(null);
+  let composing = false;
   const unavailable = $derived(loading || pending || needsReload || !snapshot);
+
+  function finishPan(cancel = false) {
+    if (!pan) return;
+    const previous = pan;
+    pan = null;
+    if (cancel) camera = previous.camera;
+    if (viewport.hasPointerCapture(previous.pointerId)) viewport.releasePointerCapture(previous.pointerId);
+  }
+
+  function pointerPoint(event: PointerEvent) {
+    return viewportPoint({x: event.clientX, y: event.clientY}, viewport.getBoundingClientRect());
+  }
+
+  function startPan(event: PointerEvent) {
+    if (!snapshot || pan || !event.isPrimary) return;
+    const onBlock = event.target instanceof Element && event.target.closest('[data-block-id]');
+    if (!((event.button === 0 && panTool) || (event.button === 1 && !onBlock))) return;
+    event.preventDefault();
+    viewport.setPointerCapture(event.pointerId);
+    pan = {pointerId: event.pointerId, start: pointerPoint(event), camera};
+  }
+
+  function movePan(event: PointerEvent) {
+    if (pan?.pointerId !== event.pointerId) return;
+    const point = pointerPoint(event);
+    camera = panScreen(pan.camera, pan.start.x - point.x, pan.start.y - point.y);
+  }
+
+  function changeZoom(direction: -1 | 0 | 1) {
+    if (!snapshot) return;
+    finishPan(true);
+    camera = zoomAt(camera, direction === 0 ? 100 : stepZoom(camera.zoom, direction),
+      {x: viewport.clientWidth / 2, y: viewport.clientHeight / 2});
+  }
+
+  function resetView() {
+    finishPan();
+    camera = {origin: {x: 0, y: 0}, zoom: 100};
+  }
+
+  function keyDown(event: KeyboardEvent) {
+    const blocked = composing || !document.hasFocus() || !!document.querySelector('dialog[open], [aria-modal="true"]');
+    if (event.defaultPrevented || blocked || event.isComposing || event.keyCode === 229) return;
+    if (event.key === 'Escape' && pan) {
+      event.preventDefault();
+      finishPan(true);
+      return;
+    }
+    const direction = zoomShortcut(event, blocked);
+    if (direction !== null) {
+      event.preventDefault(); // Stop WebView page zoom, including at our endpoints.
+      changeZoom(direction);
+    }
+  }
 
   function reconcile(next: LayoutSnapshotV1) {
     if (next.api_version !== 1) throw new Error('Unsupported workspace API version.');
@@ -81,6 +142,9 @@
   onMount(loadWorkspace);
 </script>
 
+<svelte:window onkeydown={keyDown} onblur={() => { composing = false; finishPan(true); }}
+  oncompositionstart={() => { composing = true; }} oncompositionend={() => { composing = false; }} />
+
 <div class="application" data-rendered-revision={snapshot?.revision ?? ''}
   data-selected-block-id={selectedId ?? ''} data-busy={loading || pending}>
   <header class="toolbar">
@@ -88,7 +152,16 @@
       <span class="workspace-mark" aria-hidden="true">▦</span>
       <h1>Workspace</h1>
     </div>
-    <div class="view-state"><span class="zoom-label">Zoom 100%</span></div>
+    <div class="view-state" aria-label="View controls">
+      <button type="button" data-testid="pan-tool" aria-pressed={panTool}
+        disabled={!snapshot} onclick={() => { finishPan(true); panTool = !panTool; }}>Pan tool</button>
+      <button type="button" data-testid="zoom-out" aria-label="Zoom out" disabled={!snapshot || camera.zoom === 25}
+        onclick={() => changeZoom(-1)}>−</button>
+      <span class="zoom-label" data-testid="zoom-label" role="status">Zoom {camera.zoom}%</span>
+      <button type="button" data-testid="zoom-in" aria-label="Zoom in" disabled={!snapshot || camera.zoom === 200}
+        onclick={() => changeZoom(1)}>+</button>
+      <button type="button" data-testid="reset-view" disabled={!snapshot} onclick={resetView}>Reset view</button>
+    </div>
     <div class="placement-controls" aria-label="Placement controls">
       <label for="placeholder-title">Title</label>
       <input id="placeholder-title" data-testid="placeholder-title" bind:value={title}
@@ -107,7 +180,11 @@
     </div>
   {/if}
 
-  <main class="board-viewport" aria-label="Workspace viewport" aria-busy={loading || pending}>
+  <main class="board-viewport" class:pan-enabled={panTool} class:panning={!!pan}
+    bind:this={viewport} aria-label="Workspace viewport" aria-busy={loading || pending}
+    onpointerdown={startPan} onpointermove={movePan}
+    onpointerup={event => { if (pan?.pointerId === event.pointerId) finishPan(); }}
+    onpointercancel={() => finishPan(true)} onlostpointercapture={() => finishPan(true)}>
     {#if !snapshot}
       <section class="empty-state">
         {#if loading}<h2>Loading workspace…</h2>
@@ -118,11 +195,12 @@
       <div class="world" data-testid="world" aria-label="Workspace board"
         style:width={`${snapshot.grid.columns * snapshot.grid.cell_px}px`}
         style:height={`${snapshot.grid.rows * snapshot.grid.cell_px}px`}
+        style:transform={`scale(${camera.zoom / 100}) translate(${-camera.origin.x}px, ${-camera.origin.y}px)`}
         style:--cell-size={`${snapshot.grid.cell_px}px`}>
         {#each snapshot.blocks as block (block.id)}
           <button type="button" class="block" data-block-id={block.id}
             aria-label={`Select ${block.title}`} aria-pressed={selectedId === block.id}
-            onclick={() => selectBlock(block.id)}
+            onclick={() => { if (!panTool) selectBlock(block.id); }}
             style:left={`${block.rect.x * snapshot.grid.cell_px}px`}
             style:top={`${block.rect.y * snapshot.grid.cell_px}px`}
             style:width={`${block.rect.width * snapshot.grid.cell_px}px`}
