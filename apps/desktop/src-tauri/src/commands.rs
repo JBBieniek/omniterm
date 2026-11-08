@@ -1,6 +1,7 @@
 use crate::snapshot::{LayoutSnapshotV1, WireU64};
 use omniterm_core::{Block, BlockId, GridRect, GridSpec, LayoutError, Workspace};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::collections::BTreeMap;
 use tauri::ipc::InvokeBody;
 
 const MAX_PAYLOAD: usize = 64 * 1024;
@@ -12,6 +13,7 @@ pub struct WorkspaceHost {
     workspace: Workspace,
     revision: u64,
     next_id: Option<u64>,
+    session_bindings: BTreeMap<BlockId, u64>,
 }
 
 impl Default for WorkspaceHost {
@@ -30,6 +32,7 @@ impl Default for WorkspaceHost {
             workspace,
             revision: 0,
             next_id: Some(3),
+            session_bindings: BTreeMap::new(),
         }
     }
 }
@@ -41,7 +44,7 @@ pub struct CommandError {
 }
 
 impl CommandError {
-    fn new(code: &'static str, message: &'static str) -> Self {
+    pub(crate) fn new(code: &'static str, message: &'static str) -> Self {
         Self { code, message }
     }
 }
@@ -94,7 +97,7 @@ struct PlaceRect {
     height: u32,
 }
 
-fn decode<T: DeserializeOwned>(body: &InvokeBody) -> Result<T, CommandError> {
+pub(crate) fn decode<T: DeserializeOwned>(body: &InvokeBody) -> Result<T, CommandError> {
     let InvokeBody::Raw(bytes) = body else {
         return Err(CommandError::new(
             "invalid_input",
@@ -133,6 +136,7 @@ fn layout_error(error: LayoutError) -> CommandError {
 impl WorkspaceHost {
     pub fn snapshot(&self) -> LayoutSnapshotV1 {
         LayoutSnapshotV1::from_workspace(&self.workspace, self.revision)
+            .with_sessions(&self.session_bindings)
     }
 
     fn validate(&self, version: u32, revision: WireU64) -> Result<u64, CommandError> {
@@ -217,6 +221,8 @@ impl WorkspaceHost {
         self.workspace
             .remove(BlockId(u64::from(request.block_id)))
             .ok_or_else(|| layout_error(LayoutError::MissingBlock))?;
+        self.session_bindings
+            .remove(&BlockId(u64::from(request.block_id)));
         self.revision = revision;
         Ok(None)
     }
@@ -237,6 +243,12 @@ impl WorkspaceHost {
         )
         .map_err(|_| CommandError::new("invalid_input", "Use at least 1 × 1 cell."))?;
         let id = BlockId(u64::from(request.block_id));
+        if self.session_bindings.contains_key(&id) && (rect.width() < 4 || rect.height() < 3) {
+            return Err(CommandError::new(
+                "invalid_input",
+                "Terminal blocks need at least 4 × 3 cells.",
+            ));
+        }
         let original = self
             .workspace
             .get(id)
@@ -247,6 +259,51 @@ impl WorkspaceHost {
             self.revision = revision;
         }
         Ok(None)
+    }
+
+    pub(crate) fn check_terminal_room(&self, revision: WireU64) -> Result<(), CommandError> {
+        self.validate(1, revision)?;
+        if self.next_id.is_none() || self.workspace.blocks().count() >= MAX_BLOCKS {
+            return Err(CommandError::new(
+                "limit_exceeded",
+                "The placement limit has been reached.",
+            ));
+        }
+        self.workspace.first_fit(12, 8).ok_or_else(|| {
+            CommandError::new(
+                "no_room",
+                "No room for a 12 × 8 terminal; remove a placement first.",
+            )
+        })?;
+        Ok(())
+    }
+    pub(crate) fn attach_terminal(
+        &mut self,
+        session: u64,
+        expected: WireU64,
+    ) -> Result<WireU64, CommandError> {
+        let revision = self.validate(1, expected)?;
+        if let Some((id, _)) = self
+            .session_bindings
+            .iter()
+            .find(|(_, value)| **value == session)
+        {
+            return Ok(id.0.into());
+        }
+        self.check_terminal_room(expected)?;
+        let id = self.next_id.unwrap();
+        let rect = self.workspace.first_fit(12, 8).unwrap();
+        self.workspace
+            .add(Block::new(
+                BlockId(id),
+                rect,
+                format!("Terminal #{session}"),
+            ))
+            .map_err(layout_error)?;
+        self.session_bindings.insert(BlockId(id), session);
+        self.next_id = id.checked_add(1);
+        self.revision = revision;
+        Ok(id.into())
     }
 }
 
@@ -631,5 +688,29 @@ mod tests {
             1
         );
         assert_eq!(host.lock().unwrap().revision, 1);
+    }
+
+    #[test]
+    fn terminal_binding_hide_reopen_and_minimum_are_placement_only() {
+        let mut host = WorkspaceHost::default();
+        let first = host.attach_terminal(42, 0.into()).unwrap();
+        let snapshot = serde_json::to_value(host.snapshot()).unwrap();
+        assert_eq!(snapshot["blocks"][2]["session_id"], "42");
+        assert_eq!(host.attach_terminal(42, 1.into()).unwrap(), first);
+        assert_eq!(host.revision, 1);
+        let id = u64::from(first).to_string();
+        rejected_place(
+            &mut host,
+            place(1, &id, json!({"x":20,"y":0,"width":3,"height":3})),
+            "invalid_input",
+        );
+        assert_eq!(value(host.remove(&remove(1, &id)))["status"], "ok");
+        assert!(host.session_bindings.is_empty());
+        let second = host.attach_terminal(42, 2.into()).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            serde_json::to_value(host.snapshot()).unwrap()["blocks"][2]["session_id"],
+            "42"
+        );
     }
 }

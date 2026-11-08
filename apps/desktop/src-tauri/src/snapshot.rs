@@ -1,5 +1,7 @@
+use omniterm_core::BlockId;
 use omniterm_core::Workspace;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Exact opaque integers at the JavaScript boundary (FOUNDATION-01).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +58,8 @@ struct BlockSnapshot {
     id: WireU64,
     title: String,
     rect: RectSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<WireU64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,6 +86,7 @@ impl LayoutSnapshotV1 {
                 .map(|block| {
                     let rect = block.rect();
                     BlockSnapshot {
+                        session_id: None,
                         id: block.id().0.into(),
                         title: block.title().to_owned(),
                         rect: RectSnapshot {
@@ -94,5 +99,15 @@ impl LayoutSnapshotV1 {
                 })
                 .collect(),
         }
+    }
+
+    pub(crate) fn with_sessions(mut self, bindings: &BTreeMap<BlockId, u64>) -> Self {
+        for block in &mut self.blocks {
+            block.session_id = bindings
+                .get(&BlockId(u64::from(block.id)))
+                .copied()
+                .map(Into::into);
+        }
+        self
     }
 }

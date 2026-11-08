@@ -1,21 +1,16 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
+  import TerminalView from './TerminalView.svelte';
+  import { terminalCommand } from './terminal';
+  import type { Session } from './terminal';
+  import type { Layout as LayoutSnapshotV1 } from './workspace';
   import { panScreen, screenToWorld, stepZoom, viewportPoint, zoomAt, zoomShortcut } from './camera';
   import type { Camera, Point } from './camera';
   import { keyboardPlacement, placementCandidate, placementError, sameRect } from './placement';
   import type { Rect } from './placement';
 
-  type LayoutSnapshotV1 = {
-    api_version: 1;
-    revision: string;
-    grid: { columns: number; rows: number; cell_px: number };
-    blocks: Array<{
-      id: string;
-      title: string;
-      rect: Rect;
-    }>;
-  };
   type MutationResult =
     | { status: 'ok'; snapshot: LayoutSnapshotV1; block_id?: string }
     | { status: 'error'; snapshot: LayoutSnapshotV1; error: { code: string; message: string } };
@@ -28,6 +23,9 @@
   let needsReload = $state(false);
   let error = $state('');
   let addButton: HTMLButtonElement;
+  let sessions = $state<Session[]>([]);
+  let sessionId = $state('');
+  let quitDialog: HTMLDialogElement;
   let viewport: HTMLElement;
   let camera = $state<Camera>({origin: {x: 0, y: 0}, zoom: 100});
   let panTool = $state(false);
@@ -153,7 +151,8 @@
       return;
     }
     if (panTool || pan || unavailable || !snapshot || event.ctrlKey || event.altKey || event.metaKey) return;
-    const frame = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-block-id]') : null;
+    const handle = event.target instanceof Element ? event.target.closest('.block-select, .resize-handle') : null;
+    const frame = handle?.closest<HTMLElement>('[data-block-id]');
     const block = snapshot.blocks.find(block => block.id === frame?.dataset.blockId && block.id === selectedId);
     if (!block) return;
     const rect = keyboardPlacement(block.rect, event.key, event.shiftKey);
@@ -217,7 +216,52 @@
     }
   }
 
-  onMount(loadWorkspace);
+  async function refreshSessions() {
+    try {
+      const result = await terminalCommand({op: 'list'});
+      if (result.status === 'ok' && result.sessions) {
+        sessions = result.sessions;
+        if (!sessions.some(s => s.session_id === sessionId)) sessionId = sessions[0]?.session_id ?? '';
+      }
+    } catch { error = 'Could not refresh Session status.'; }
+  }
+
+  async function terminalAction(op: 'start' | 'reopen' | 'terminate' | 'quit') {
+    if (pending || !snapshot || (needsReload && op !== 'quit')) return;
+    pending = true;
+    error = '';
+    try {
+      const result = await terminalCommand({op, ...(op === 'start' || op === 'reopen'
+        ? {expected_revision: snapshot.revision} : {}),
+        ...(op === 'reopen' || op === 'terminate' ? {session_id: sessionId} : {})});
+      if (result.status === 'error') {
+        error = result.error.message;
+        // Reconcile a rejected placement without ever retrying a process start.
+        if (op === 'start' || op === 'reopen') reconcile(await invoke<LayoutSnapshotV1>('get_layout_snapshot'));
+      } else {
+        if (result.layout) reconcile(result.layout);
+        if (result.sessions) sessions = result.sessions;
+        if (result.session_id) sessionId = result.session_id;
+        if (result.block_id) {
+          selectBlock(result.block_id);
+          const block = snapshot.blocks.find(b => b.id === result.block_id);
+          if (block) camera = {...camera, origin: {x: block.rect.x * snapshot.grid.cell_px, y: block.rect.y * snapshot.grid.cell_px}};
+        }
+      }
+    } catch {
+      needsReload = true;
+      error = 'Could not confirm the terminal action; it was not retried. Reload before another action.';
+    } finally { pending = false; }
+  }
+
+  onMount(() => {
+    void loadWorkspace();
+    void refreshSessions();
+    const listeners = [listen('request-quit', () => { if (!quitDialog.open) quitDialog.showModal(); }),
+      listen<string>('quit-failed', event => { error = event.payload; })];
+    void Promise.all(listeners).catch(() => { error = 'Could not subscribe to app quit confirmation; restart Omniterm.'; needsReload = true; });
+    return () => { for (const listener of listeners) void listener.then(unlisten => unlisten(), () => {}); };
+  });
 </script>
 
 <svelte:window onkeydown={keyDown} onblur={() => { composing = false; cancelGestures(); }} onresize={cancelGestures}
@@ -245,11 +289,26 @@
       <label for="placeholder-title">Title</label>
       <input id="placeholder-title" data-testid="placeholder-title" bind:value={title}
         maxlength="256" disabled={unavailable} autocomplete="off" />
+      <button type="button" data-testid="new-terminal" disabled={unavailable}
+        onclick={() => terminalAction('start')}>New terminal</button>
       <button type="button" data-testid="add-placeholder" bind:this={addButton}
         disabled={unavailable || !title.trim()} onclick={() => mutate('add_placeholder')}>Add placeholder</button>
       <button type="button" data-testid="remove-placement" disabled={unavailable || !selectedId}
         onclick={() => mutate('remove_placement')}>Remove placement</button>
     </div>
+    {#if sessions.length}
+      <div class="session-controls" aria-label="Session controls">
+        <label for="session">Session</label>
+        <select id="session" data-testid="session-select" bind:value={sessionId} disabled={unavailable}>
+          {#each sessions as session}<option value={session.session_id}>#{session.session_id} · {session.state}</option>{/each}
+        </select>
+        <button type="button" data-testid="reopen-terminal" disabled={unavailable || !sessionId}
+          onclick={() => terminalAction('reopen')}>Show terminal</button>
+        <button type="button" data-testid="terminate-session" disabled={unavailable || !sessionId || sessions.find(s => s.session_id === sessionId)?.state !== 'running'}
+          onclick={() => terminalAction('terminate')}>Terminate Session</button>
+        <span>Removing a placement keeps its Session running.</span>
+      </div>
+    {/if}
   </header>
 
   {#if error && snapshot}
@@ -277,6 +336,7 @@
         style:--cell-size={`${snapshot.grid.cell_px}px`}>
         {#each snapshot.blocks as block (block.id)}
           <div class="block" class:selected={selectedId === block.id} data-block-id={block.id}
+            class:terminal-block={!!block.session_id}
             style:left={`${block.rect.x * snapshot.grid.cell_px}px`}
             style:top={`${block.rect.y * snapshot.grid.cell_px}px`}
             style:width={`${block.rect.width * snapshot.grid.cell_px}px`}
@@ -286,9 +346,11 @@
               onclick={() => { if (!panTool) selectBlock(block.id); }}>
               <span class="block-header" data-drag-block={block.id} title="Drag to move">
                 <span class="block-title" data-testid="block-title">{block.title}</span><span class="block-id">#{block.id}</span></span>
-              <span class="block-content"><span class="placeholder-symbol" aria-hidden="true">▦</span>
+              {#if !block.session_id}<span class="block-content"><span class="placeholder-symbol" aria-hidden="true">▦</span>
                 <span>Placeholder</span><span class="block-dimensions">{block.rect.width} × {block.rect.height} cells</span></span>
+              {/if}
             </button>
+            {#if block.session_id}<TerminalView sessionId={block.session_id} onstate={refreshSessions} />{/if}
             <button type="button" class="resize-handle" data-resize-block={block.id} aria-describedby="layout-instructions"
               aria-label={`Resize ${block.title} from bottom right`} title="Drag to resize; Shift+arrows with keyboard"
               onclick={() => { if (!panTool) selectBlock(block.id); }}>↘</button>
@@ -325,3 +387,11 @@
     {/if}
   </footer>
 </div>
+
+<dialog bind:this={quitDialog} aria-labelledby="quit-title">
+  <h2 id="quit-title">Stop live Sessions and quit?</h2>
+  <p>Quitting stops the shells and their owned child processes.</p>
+  <button type="button" data-testid="cancel-quit" onclick={() => quitDialog.close()}>Keep working</button>
+  <button type="button" data-testid="confirm-quit" disabled={pending}
+    onclick={() => { quitDialog.close(); void terminalAction('quit'); }}>Stop Sessions and quit</button>
+</dialog>

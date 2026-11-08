@@ -16,7 +16,7 @@ fn main() {
     // This is the production app's construction path, content, commands and ACL.
     let app = omniterm_desktop::application().expect("failed to build the test app");
     automation::start(app.handle().clone());
-    app.run(|_, _| {});
+    omniterm_desktop::run_app(app);
 }
 
 #[cfg(not(windows))]

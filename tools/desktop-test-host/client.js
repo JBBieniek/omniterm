@@ -2,8 +2,10 @@ import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 
 export async function inspectReady(app) {
+  let last;
   for (let attempt = 0; attempt < 50; attempt++) {
     const response = await app.request('inspect');
+    last = response;
     const state = response.result;
     if (state && state.rendered.rendered_revision === state.layout.revision) return state;
     if (response.error && !['window_missing', 'bundled_content_required'].includes(response.error)) {
@@ -11,14 +13,16 @@ export async function inspectReady(app) {
     }
     await new Promise(resolve => setTimeout(resolve, 100));
   }
-  throw new Error('Native UI did not finish loading');
+  throw new Error('Native UI did not finish loading: ' + JSON.stringify({error:last?.error,
+    revision:last?.result?.layout?.revision,rendered:last?.result?.rendered?.rendered_revision,
+    origin:last?.result?.rendered?.origin,ui_error:last?.result?.rendered?.error}));
 }
 
 // Separate test-host client. Tokens travel over inherited pipes, never argv, env,
 // URLs, logs or the renderer; no HTTP/CDP debugging listener is started.
-export async function launchAutomation(binary, { hello } = {}) {
+export async function launchAutomation(binary, { hello, cwd } = {}) {
   const token = randomBytes(32).toString('hex');
-  const child = spawn(binary, ['--automation'], { stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(binary, ['--automation'], { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
   let pending;
   let buffered = '';
   let stderr = '';

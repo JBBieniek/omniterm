@@ -5,6 +5,7 @@ fn main() {
             "add_placeholder",
             "remove_placement",
             "place_block",
+            "terminal_command",
         ]),
     ))
     .expect("failed to build the desktop host");

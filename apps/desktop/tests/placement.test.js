@@ -42,6 +42,7 @@ test('preview uses minimum 1x1, finite board and half-open collision bounds', ()
   for (const width of [0,-1,1.5,Infinity,NaN]) {
     assert(placementError({x:0,y:0,width,height:1},grid,blocks,'1'));
   }
+  assert.match(placementError({x:0,y:0,width:3,height:3},grid,[{...blocks[0],session_id:'42'}],'1'), /4 × 3/);
 });
 
 test('keyboard moves one cell, Shift resizes from fixed top-left', () => {

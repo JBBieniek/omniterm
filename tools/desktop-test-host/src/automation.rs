@@ -45,6 +45,10 @@ enum Command {
     Text {
         text: String,
     },
+    Paste {
+        text: String,
+    },
+    RequestClose,
     Revoke,
     Close,
 }
@@ -55,6 +59,7 @@ enum Key {
     Tab,
     Enter,
     Escape,
+    Interrupt,
     ZoomIn,
     ZoomPlus,
     ZoomOut,
@@ -225,6 +230,14 @@ fn serve(
             Command::CancelPan { lost_capture } => reply(output, cancel_pan(app, lost_capture))?,
             Command::Key { key } => reply(output, key_event(app, key))?,
             Command::Text { text } => reply(output, insert_text(app, &text))?,
+            Command::Paste { text } => reply(output, paste_text(app, &text))?,
+            Command::RequestClose => reply(
+                output,
+                window(app).and_then(|w| {
+                    w.close().map_err(|_| "close_failed")?;
+                    Ok(json!({"close_requested": true}))
+                }),
+            )?,
             Command::Revoke => reply(output, Ok(json!({ "revoked": true })))?,
             Command::Close => {
                 reply(output, Ok(json!({ "closing": true })))?;
@@ -285,6 +298,8 @@ const OBSERVE: &str = r#"(async () => {
   busy: app?.dataset.busy === 'true',
   error: document.querySelector('[data-testid="command-error"]')?.textContent?.trim().slice(0, 1024) ?? '',
   controls: { title: control('placeholder-title'), add: control('add-placeholder'), remove: control('remove-placement'),
+    new_terminal: control('new-terminal'), reopen: control('reopen-terminal'), terminate: control('terminate-session'),
+    cancel_quit: control('cancel-quit'), confirm_quit: control('confirm-quit'),
     pan: control('pan-tool'), zoom_in: control('zoom-in'), zoom_out: control('zoom-out'), reset: control('reset-view') },
   camera: matrix ? {zoom: matrix.a * 100, origin: {x: -matrix.e / matrix.a, y: -matrix.f / matrix.d}} : null,
   viewport: viewport ? {...bounds(viewport), scroll_x: viewport.scrollLeft, scroll_y: viewport.scrollTop} : null,
@@ -306,6 +321,15 @@ const OBSERVE: &str = r#"(async () => {
     width: parseFloat(element.style.width), height: parseFloat(element.style.height),
     injected_elements: element.querySelectorAll('script,img,iframe,svg').length
   })),
+  terminals: [...document.querySelectorAll('[data-session-id]')].slice(0, 4).map(element => ({
+    session_id: element.dataset.sessionId, state: element.dataset.terminalState,
+    rows: Number(element.dataset.terminalRows), cols: Number(element.dataset.terminalCols),
+    input: bounds(element.querySelector('textarea')),
+    text: [...element.querySelectorAll('.terminal-row')].map(row => row.textContent).join('\n'),
+    status: element.querySelector('.terminal-status')?.textContent,
+    error: element.querySelector('.terminal-error')?.textContent ?? ''
+  })),
+  quit_dialog: !!document.querySelector('dialog[open]'),
   status: document.querySelector('[data-testid="workspace-status"]')?.textContent?.trim().slice(0, 256) ?? null,
   block_count: document.querySelector('[data-testid="block-count"]')?.textContent?.trim().slice(0, 256) ?? null,
   grid: document.querySelector('[data-testid="grid-dimensions"]')?.textContent?.trim().slice(0, 256) ?? null,
@@ -333,12 +357,24 @@ fn inspect(app: &tauri::AppHandle) -> Result<Value, &'static str> {
         .map_err(|_| "workspace_unavailable")?
         .snapshot();
     let size = window.inner_size().map_err(|_| "window_unavailable")?;
-    Ok(json!({ "layout": layout, "rendered": rendered, "window": {
-        "title": window.title().map_err(|_| "window_unavailable")?,
-        "width": size.width, "height": size.height,
-        "scale_factor": window.scale_factor().map_err(|_| "window_unavailable")?,
-        "visible": window.is_visible().map_err(|_| "window_unavailable")?
-    }}))
+    let runtime = app.state::<omniterm_desktop::terminal::TerminalHost>();
+    let sessions = runtime.list();
+    let screens = sessions
+        .iter()
+        .map(|session| {
+            runtime
+                .screen(session.session_id.into(), None)
+                .map_err(|_| "terminal_unavailable")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(
+        json!({ "layout": layout, "rendered": rendered, "sessions": sessions, "screens": screens, "window": {
+            "title": window.title().map_err(|_| "window_unavailable")?,
+            "width": size.width, "height": size.height,
+            "scale_factor": window.scale_factor().map_err(|_| "window_unavailable")?,
+            "visible": window.is_visible().map_err(|_| "window_unavailable")?
+        }}),
+    )
 }
 
 fn screenshot(app: &tauri::AppHandle) -> Result<Value, &'static str> {
@@ -374,6 +410,31 @@ fn insert_text(app: &tauri::AppHandle, text: &str) -> Result<Value, &'static str
     Ok(json!({"text_sent": true}))
 }
 
+fn paste_text(app: &tauri::AppHandle, text: &str) -> Result<Value, &'static str> {
+    validate_text(text)?;
+    // Synthetic clipboard payload, scoped to the focused terminal; never reads or
+    // modifies the host clipboard. This does not establish physical paste/IME.
+    let value = serde_json::to_string(text).map_err(|_| "invalid_text")?;
+    let expression = format!(
+        r#"(() => {{
+      const input = document.activeElement;
+      if (!input?.matches('.terminal textarea')) return false;
+      const data = new DataTransfer(); data.setData('text/plain', {value});
+      input.dispatchEvent(new ClipboardEvent('paste', {{clipboardData:data, bubbles:true, cancelable:true}}));
+      return true;
+    }})()"#
+    );
+    let result = protocol(
+        &window(app)?,
+        "Runtime.evaluate",
+        json!({"expression":expression,"returnByValue":true}),
+    )?;
+    if result.pointer("/result/value") != Some(&Value::Bool(true)) {
+        return Err("terminal_not_focused");
+    }
+    Ok(json!({"paste_sent": true}))
+}
+
 fn click(app: &tauri::AppHandle, x: u32, y: u32) -> Result<Value, &'static str> {
     let window = window(app)?;
     let size = window
@@ -399,6 +460,7 @@ fn key_event(app: &tauri::AppHandle, key: Key) -> Result<Value, &'static str> {
         Key::Tab => ("Tab", "Tab", 9, 0, 0),
         Key::Enter => ("Enter", "Enter", 13, 0, 0),
         Key::Escape => ("Escape", "Escape", 27, 0, 0),
+        Key::Interrupt => ("c", "KeyC", 67, 2, 0),
         Key::ZoomIn => ("=", "Equal", 187, 2, 0),
         Key::ZoomPlus => ("+", "Equal", 187, 10, 0),
         Key::ZoomOut => ("-", "Minus", 189, 2, 0),

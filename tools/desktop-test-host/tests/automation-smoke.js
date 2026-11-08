@@ -22,6 +22,7 @@ const cameraCommands = [
   {resize:{width:640,height:480}}, {key:{key:'zoom_in'}},
   'shortcut_guards', {cancel_pan:{lost_capture:true}},
   'advance_layout', {key:{key:'resize_right'}},
+  'request_close', {key:{key:'interrupt'}}, {paste:{text:'unauthorized'}},
 ];
 try {
   if (mode === 'excluded') {
