@@ -35,6 +35,7 @@ enum Command {
         height: u32,
     },
     ShortcutGuards,
+    AdvanceLayout,
     CancelPan {
         lost_capture: bool,
     },
@@ -60,6 +61,14 @@ enum Key {
     ZoomReset,
     NumpadAdd,
     NumpadSubtract,
+    ArrowLeft,
+    ArrowRight,
+    ArrowUp,
+    ArrowDown,
+    ResizeLeft,
+    ResizeRight,
+    ResizeUp,
+    ResizeDown,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -212,6 +221,7 @@ fn serve(
             } => reply(output, pointer(app, phase, button, x, y))?,
             Command::Resize { width, height } => reply(output, resize(app, width, height))?,
             Command::ShortcutGuards => reply(output, shortcut_guards(app))?,
+            Command::AdvanceLayout => reply(output, advance_layout(app))?,
             Command::CancelPan { lost_capture } => reply(output, cancel_pan(app, lost_capture))?,
             Command::Key { key } => reply(output, key_event(app, key))?,
             Command::Text { text } => reply(output, insert_text(app, &text))?,
@@ -243,6 +253,7 @@ const OBSERVE: &str = r#"(async () => {
   const app = document.querySelector('.application');
   const world = document.querySelector('[data-testid="world"]');
   const viewport = document.querySelector('.board-viewport');
+  const preview = document.querySelector('[data-testid="placement-preview"]');
   const matrix = world ? new DOMMatrix(getComputedStyle(world).transform) : null;
   const bounds = element => {
     if (!element) return null;
@@ -265,6 +276,7 @@ const OBSERVE: &str = r#"(async () => {
       events.key_downs = Math.min(events.key_downs + 1, 1000000);
       events.key_trusted = event.isTrusted;
     }, true);
+    document.addEventListener('pointerdown', event => { events.pointer_id = event.pointerId; }, true);
   }
   return {
   origin: location.origin,
@@ -279,13 +291,17 @@ const OBSERVE: &str = r#"(async () => {
   page: {dpr: devicePixelRatio, scale: visualViewport?.scale, toolbar: bounds(document.querySelector('.toolbar'))},
   pan_tool: document.querySelector('[data-testid="pan-tool"]')?.getAttribute('aria-pressed') === 'true',
   panning: viewport?.classList.contains('panning') ?? false,
-  active: {test_id: document.activeElement?.dataset.testid ?? null, block_id: document.activeElement?.dataset.blockId ?? null,
+  active: {test_id: document.activeElement?.dataset.testid ?? null, block_id: document.activeElement?.closest('[data-block-id]')?.dataset.blockId ?? null,
     focus_visible: document.activeElement?.matches(':focus-visible') ?? false},
+  placement_preview: preview ? {viewport: bounds(preview), invalid: preview.classList.contains('invalid'),
+    text: preview.textContent?.trim().slice(0, 256), left:parseFloat(preview.style.left), top:parseFloat(preview.style.top),
+    width:parseFloat(preview.style.width), height:parseFloat(preview.style.height)} : null,
   world: world ? {width: world.offsetWidth, height: world.offsetHeight, child_count: world.children.length,
     background_size: getComputedStyle(world).backgroundSize, background_image: getComputedStyle(world).backgroundImage} : null,
   blocks: [...document.querySelectorAll('[data-block-id]')].slice(0, 256).map(element => ({
     id: element.dataset.blockId, title: element.querySelector('[data-testid="block-title"]')?.textContent ?? '',
-    selected: element.getAttribute('aria-pressed') === 'true', viewport: bounds(element),
+    selected: element.querySelector('.block-select')?.getAttribute('aria-pressed') === 'true', viewport: bounds(element),
+    header: bounds(element.querySelector('[data-drag-block]')), resize: bounds(element.querySelector('[data-resize-block]')),
     left: parseFloat(element.style.left), top: parseFloat(element.style.top),
     width: parseFloat(element.style.width), height: parseFloat(element.style.height),
     injected_elements: element.querySelectorAll('script,img,iframe,svg').length
@@ -389,6 +405,14 @@ fn key_event(app: &tauri::AppHandle, key: Key) -> Result<Value, &'static str> {
         Key::ZoomReset => ("0", "Digit0", 48, 2, 0),
         Key::NumpadAdd => ("+", "NumpadAdd", 107, 2, 3),
         Key::NumpadSubtract => ("-", "NumpadSubtract", 109, 2, 3),
+        Key::ArrowLeft => ("ArrowLeft", "ArrowLeft", 37, 0, 0),
+        Key::ArrowRight => ("ArrowRight", "ArrowRight", 39, 0, 0),
+        Key::ArrowUp => ("ArrowUp", "ArrowUp", 38, 0, 0),
+        Key::ArrowDown => ("ArrowDown", "ArrowDown", 40, 0, 0),
+        Key::ResizeLeft => ("ArrowLeft", "ArrowLeft", 37, 8, 0),
+        Key::ResizeRight => ("ArrowRight", "ArrowRight", 39, 8, 0),
+        Key::ResizeUp => ("ArrowUp", "ArrowUp", 38, 8, 0),
+        Key::ResizeDown => ("ArrowDown", "ArrowDown", 40, 8, 0),
     };
     for event in ["keyDown", "keyUp"] {
         protocol(
@@ -483,9 +507,9 @@ fn shortcut_guards(app: &tauri::AppHandle) -> Result<Value, &'static str> {
 
 fn cancel_pan(app: &tauri::AppHandle, lost_capture: bool) -> Result<Value, &'static str> {
     let expression = if lost_capture {
-        r#"(() => { const viewport = document.querySelector('.board-viewport'); viewport.dispatchEvent(new PointerEvent('lostpointercapture')); return {synthetic:true}; })()"#
+        r#"(() => { const viewport = document.querySelector('.board-viewport'); viewport.dispatchEvent(new PointerEvent('lostpointercapture', {pointerId:globalThis.__omniterm_test_events?.pointer_id ?? 0})); return {synthetic:true}; })()"#
     } else {
-        r#"(() => { const viewport = document.querySelector('.board-viewport'); viewport.dispatchEvent(new PointerEvent('pointercancel')); return {synthetic:true}; })()"#
+        r#"(() => { const viewport = document.querySelector('.board-viewport'); viewport.dispatchEvent(new PointerEvent('pointercancel', {pointerId:globalThis.__omniterm_test_events?.pointer_id ?? 0})); return {synthetic:true}; })()"#
     };
     protocol(
         &window(app)?,
@@ -493,6 +517,29 @@ fn cancel_pan(app: &tauri::AppHandle, lost_capture: bool) -> Result<Value, &'sta
         json!({"expression":expression, "returnByValue":true}),
     )?;
     Ok(json!({"synthetic":true}))
+}
+
+// Fixed competing-client IPC probe for stale gesture reconciliation. It invokes
+// the real authorized command; it cannot choose a command, ID, script or rect.
+fn advance_layout(app: &tauri::AppHandle) -> Result<Value, &'static str> {
+    let result = protocol(
+        &window(app)?,
+        "Runtime.evaluate",
+        json!({
+            "expression": r#"(async () => {
+          const invoke = window.__TAURI_INTERNALS__.invoke;
+          const snapshot = await invoke('get_layout_snapshot');
+          const block = snapshot.blocks.find(block => block.id === '2');
+          return await invoke('place_block', new TextEncoder().encode(JSON.stringify({api_version:1,
+            expected_revision:snapshot.revision, block_id:'2', rect:{...block.rect,y:1}})));
+        })()"#,
+            "awaitPromise":true, "returnByValue":true
+        }),
+    )?;
+    result
+        .pointer("/result/value")
+        .cloned()
+        .ok_or("observation_failed")
 }
 
 fn resize(app: &tauri::AppHandle, width: u32, height: u32) -> Result<Value, &'static str> {

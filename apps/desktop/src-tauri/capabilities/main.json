@@ -3,5 +3,5 @@
   "identifier": "main-workspace",
   "description": "Only the local main window may read and edit workspace placements.",
   "windows": ["main"],
-  "permissions": ["allow-get-layout-snapshot", "allow-add-placeholder", "allow-remove-placement"]
+  "permissions": ["allow-get-layout-snapshot", "allow-add-placeholder", "allow-remove-placement", "allow-place-block"]
 }

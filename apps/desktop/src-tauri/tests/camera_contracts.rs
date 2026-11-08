@@ -36,3 +36,14 @@ fn frontend_and_rust_share_transform_and_anchor_fixtures() {
         near(camera.origin(), point(&case["new_origin"]));
     }
 }
+
+#[test]
+fn frontend_snap_fixtures_match_rust_ties_away_from_zero() {
+    let cases: Value = serde_json::from_str(include_str!("../../tests/camera-cases.json")).unwrap();
+    for case in cases["snap_delta"].as_array().unwrap() {
+        assert_eq!(
+            case["delta_cells"].as_f64().unwrap().round(),
+            case["expected"].as_f64().unwrap()
+        );
+    }
+}

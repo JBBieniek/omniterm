@@ -5,6 +5,12 @@
     {"origin": [100, 50], "zoom": 50, "world": [164, 178], "screen": [32, 64]},
     {"origin": [-64, -32], "zoom": 200, "world": [0, 0], "screen": [128, 64]}
   ],
+  "snap_delta": [
+    {"delta_cells": 0.5, "expected": 1},
+    {"delta_cells": -0.5, "expected": -1},
+    {"delta_cells": -1.5, "expected": -2},
+    {"delta_cells": 1.49, "expected": 1}
+  ],
   "zoom_at": [
     {"origin": [0, 0], "old_zoom": 100, "new_zoom": 50, "anchor": [640, 360], "new_origin": [-640, -360]},
     {"origin": [100, 50], "old_zoom": 50, "new_zoom": 100, "anchor": [400, 200], "new_origin": [500, 250]}

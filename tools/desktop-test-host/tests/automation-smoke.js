@@ -21,6 +21,7 @@ const cameraCommands = [
   {pointer:{phase:'move',button:'left',x:10,y:10}},
   {resize:{width:640,height:480}}, {key:{key:'zoom_in'}},
   'shortcut_guards', {cancel_pan:{lost_capture:true}},
+  'advance_layout', {key:{key:'resize_right'}},
 ];
 try {
   if (mode === 'excluded') {

@@ -38,6 +38,17 @@ fn remove_placement(
         .remove(request.body()))
 }
 
+#[tauri::command]
+fn place_block(
+    request: Request<'_>,
+    workspace: State<'_, Mutex<WorkspaceHost>>,
+) -> Result<MutationResult, &'static str> {
+    Ok(workspace
+        .lock()
+        .map_err(|_| "Workspace unavailable.")?
+        .place(request.body()))
+}
+
 /// Construct the real app; the separate test executable is a second consumer.
 pub fn application() -> tauri::Result<tauri::App<tauri::Wry>> {
     tauri::Builder::default()
@@ -45,7 +56,8 @@ pub fn application() -> tauri::Result<tauri::App<tauri::Wry>> {
         .invoke_handler(tauri::generate_handler![
             get_layout_snapshot,
             add_placeholder,
-            remove_placement
+            remove_placement,
+            place_block
         ])
         .build(tauri::generate_context!())
 }

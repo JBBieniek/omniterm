@@ -1,8 +1,10 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { panScreen, stepZoom, viewportPoint, zoomAt, zoomShortcut } from './camera';
+  import { panScreen, screenToWorld, stepZoom, viewportPoint, zoomAt, zoomShortcut } from './camera';
   import type { Camera, Point } from './camera';
+  import { keyboardPlacement, placementCandidate, placementError, sameRect } from './placement';
+  import type { Rect } from './placement';
 
   type LayoutSnapshotV1 = {
     api_version: 1;
@@ -11,7 +13,7 @@
     blocks: Array<{
       id: string;
       title: string;
-      rect: { x: number; y: number; width: number; height: number };
+      rect: Rect;
     }>;
   };
   type MutationResult =
@@ -30,8 +32,27 @@
   let camera = $state<Camera>({origin: {x: 0, y: 0}, zoom: 100});
   let panTool = $state(false);
   let pan = $state<{pointerId: number; start: Point; camera: Camera} | null>(null);
+  let placement = $state<{
+    pointerId: number; blockId: string; original: Rect; candidate: Rect; grab: Point;
+    camera: Camera; bounds: {left: number; top: number}; cellPx: number;
+    revision: string; kind: 'move' | 'resize';
+  } | null>(null);
   let composing = false;
-  const unavailable = $derived(loading || pending || needsReload || !snapshot);
+  const unavailable = $derived(loading || pending || needsReload || !snapshot || !!placement);
+  const previewError = $derived(placement && snapshot
+    ? placementError(placement.candidate, snapshot.grid, snapshot.blocks, placement.blockId) : null);
+
+  function cancelPlacement() {
+    if (!placement) return;
+    const pointerId = placement.pointerId;
+    placement = null;
+    if (viewport.hasPointerCapture(pointerId)) viewport.releasePointerCapture(pointerId);
+  }
+
+  function cancelGestures() {
+    finishPan(true);
+    cancelPlacement();
+  }
 
   function finishPan(cancel = false) {
     if (!pan) return;
@@ -54,37 +75,91 @@
     pan = {pointerId: event.pointerId, start: pointerPoint(event), camera};
   }
 
+  function startPointer(event: PointerEvent) {
+    if (pan || placement) return;
+    if (panTool || event.button === 1) { startPan(event); return; }
+    if (unavailable || !snapshot || event.button !== 0 || !event.isPrimary || !(event.target instanceof Element)) return;
+    const handle = event.target.closest<HTMLElement>('[data-resize-block], [data-drag-block]');
+    const id = handle?.dataset.resizeBlock ?? handle?.dataset.dragBlock;
+    const block = snapshot.blocks.find(block => block.id === id);
+    if (!block) return;
+    event.preventDefault();
+    selectBlock(block.id);
+    event.target.closest('button')?.focus({preventScroll: true});
+    const bounds = viewport.getBoundingClientRect();
+    viewport.setPointerCapture(event.pointerId);
+    placement = {pointerId: event.pointerId, blockId: block.id, original: block.rect, candidate: block.rect,
+      grab: screenToWorld(camera, viewportPoint({x: event.clientX, y: event.clientY}, bounds)), camera,
+      bounds: {left: bounds.left, top: bounds.top}, cellPx: snapshot.grid.cell_px,
+      revision: snapshot.revision, kind: handle?.dataset.resizeBlock ? 'resize' : 'move'};
+  }
+
   function movePan(event: PointerEvent) {
     if (pan?.pointerId !== event.pointerId) return;
     const point = pointerPoint(event);
     camera = panScreen(pan.camera, pan.start.x - point.x, pan.start.y - point.y);
   }
 
+  function movePointer(event: PointerEvent) {
+    movePan(event);
+    if (placement?.pointerId !== event.pointerId) return;
+    const current = screenToWorld(placement.camera,
+      viewportPoint({x: event.clientX, y: event.clientY}, placement.bounds));
+    placement.candidate = placementCandidate(placement.original, placement.grab, current, placement.cellPx, placement.kind);
+  }
+
+  async function submitPlacement(blockId: string, rect: Rect, revision: string) {
+    if (!snapshot) return;
+    const original = snapshot.blocks.find(block => block.id === blockId)?.rect;
+    if (!original || sameRect(rect, original)) return;
+    const reason = placementError(rect, snapshot.grid, snapshot.blocks, blockId);
+    if (reason) { error = `${reason} Placement unchanged.`; return; }
+    await mutate('place_block', {blockId, rect, revision});
+  }
+
+  function finishPointer(event: PointerEvent) {
+    if (pan?.pointerId === event.pointerId) { finishPan(); return; }
+    if (placement?.pointerId !== event.pointerId) return;
+    movePointer(event);
+    const finished = placement;
+    cancelPlacement();
+    void submitPlacement(finished.blockId, finished.candidate, finished.revision);
+  }
+
   function changeZoom(direction: -1 | 0 | 1) {
     if (!snapshot) return;
-    finishPan(true);
+    cancelGestures();
     camera = zoomAt(camera, direction === 0 ? 100 : stepZoom(camera.zoom, direction),
       {x: viewport.clientWidth / 2, y: viewport.clientHeight / 2});
   }
 
   function resetView() {
-    finishPan();
+    cancelGestures();
     camera = {origin: {x: 0, y: 0}, zoom: 100};
   }
 
   function keyDown(event: KeyboardEvent) {
     const blocked = composing || !document.hasFocus() || !!document.querySelector('dialog[open], [aria-modal="true"]');
     if (event.defaultPrevented || blocked || event.isComposing || event.keyCode === 229) return;
-    if (event.key === 'Escape' && pan) {
+    if (event.key === 'Escape' && (pan || placement)) {
       event.preventDefault();
-      finishPan(true);
+      cancelGestures();
       return;
     }
     const direction = zoomShortcut(event, blocked);
     if (direction !== null) {
       event.preventDefault(); // Stop WebView page zoom, including at our endpoints.
       changeZoom(direction);
+      return;
     }
+    if (panTool || pan || unavailable || !snapshot || event.ctrlKey || event.altKey || event.metaKey) return;
+    const frame = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-block-id]') : null;
+    const block = snapshot.blocks.find(block => block.id === frame?.dataset.blockId && block.id === selectedId);
+    if (!block) return;
+    const rect = keyboardPlacement(block.rect, event.key, event.shiftKey);
+    if (!rect) return;
+    event.preventDefault();
+    void submitPlacement(block.id, rect, snapshot.revision);
   }
 
   function reconcile(next: LayoutSnapshotV1) {
@@ -111,22 +186,25 @@
     if (snapshot?.blocks.some(block => block.id === id)) selectedId = id;
   }
 
-  async function mutate(command: 'add_placeholder' | 'remove_placement') {
+  async function mutate(command: 'add_placeholder' | 'remove_placement' | 'place_block',
+    target?: {blockId: string; rect: Rect; revision: string}) {
     if (unavailable || !snapshot || (command === 'remove_placement' && !selectedId)) return;
+    if (command === 'place_block' && !target) return;
     pending = true;
     error = '';
     let removed = false;
     try {
       const body = {
         api_version: 1,
-        expected_revision: snapshot.revision,
-        ...(command === 'add_placeholder' ? { title: title.trim() } : { block_id: selectedId }),
+        expected_revision: target?.revision ?? snapshot.revision,
+        ...(command === 'add_placeholder' ? { title: title.trim() }
+          : command === 'place_block' && target ? {block_id: target.blockId, rect: target.rect} : { block_id: selectedId }),
       };
       const result = await invoke<MutationResult>(command, new TextEncoder().encode(JSON.stringify(body)));
       reconcile(result.snapshot);
       if (result.status === 'error') error = result.error.message;
       else if (command === 'add_placeholder' && result.block_id) selectBlock(result.block_id);
-      else removed = true;
+      else if (command === 'remove_placement') removed = true;
     } catch {
       needsReload = true;
       error = 'Could not confirm this change. Reload the workspace before trying again.';
@@ -142,7 +220,7 @@
   onMount(loadWorkspace);
 </script>
 
-<svelte:window onkeydown={keyDown} onblur={() => { composing = false; finishPan(true); }}
+<svelte:window onkeydown={keyDown} onblur={() => { composing = false; cancelGestures(); }} onresize={cancelGestures}
   oncompositionstart={() => { composing = true; }} oncompositionend={() => { composing = false; }} />
 
 <div class="application" data-rendered-revision={snapshot?.revision ?? ''}
@@ -154,7 +232,8 @@
     </div>
     <div class="view-state" aria-label="View controls">
       <button type="button" data-testid="pan-tool" aria-pressed={panTool}
-        disabled={!snapshot} onclick={() => { finishPan(true); panTool = !panTool; }}>Pan tool</button>
+        title="When off: drag block headers; arrows move, Shift+arrows resize a focused selected block"
+        disabled={!snapshot} onclick={() => { cancelGestures(); panTool = !panTool; }}>Pan tool</button>
       <button type="button" data-testid="zoom-out" aria-label="Zoom out" disabled={!snapshot || camera.zoom === 25}
         onclick={() => changeZoom(-1)}>−</button>
       <span class="zoom-label" data-testid="zoom-label" role="status">Zoom {camera.zoom}%</span>
@@ -182,9 +261,8 @@
 
   <main class="board-viewport" class:pan-enabled={panTool} class:panning={!!pan}
     bind:this={viewport} aria-label="Workspace viewport" aria-busy={loading || pending}
-    onpointerdown={startPan} onpointermove={movePan}
-    onpointerup={event => { if (pan?.pointerId === event.pointerId) finishPan(); }}
-    onpointercancel={() => finishPan(true)} onlostpointercapture={() => finishPan(true)}>
+    onpointerdown={startPointer} onpointermove={movePointer} onpointerup={finishPointer}
+    onpointercancel={cancelGestures} onlostpointercapture={cancelGestures}>
     {#if !snapshot}
       <section class="empty-state">
         {#if loading}<h2>Loading workspace…</h2>
@@ -198,26 +276,43 @@
         style:transform={`scale(${camera.zoom / 100}) translate(${-camera.origin.x}px, ${-camera.origin.y}px)`}
         style:--cell-size={`${snapshot.grid.cell_px}px`}>
         {#each snapshot.blocks as block (block.id)}
-          <button type="button" class="block" data-block-id={block.id}
-            aria-label={`Select ${block.title}`} aria-pressed={selectedId === block.id}
-            onclick={() => { if (!panTool) selectBlock(block.id); }}
+          <div class="block" class:selected={selectedId === block.id} data-block-id={block.id}
             style:left={`${block.rect.x * snapshot.grid.cell_px}px`}
             style:top={`${block.rect.y * snapshot.grid.cell_px}px`}
             style:width={`${block.rect.width * snapshot.grid.cell_px}px`}
             style:height={`${block.rect.height * snapshot.grid.cell_px}px`}>
-            <span class="block-header"><span class="block-title" data-testid="block-title">{block.title}</span>
-              <span class="block-id">#{block.id}</span></span>
-            <span class="block-content"><span class="placeholder-symbol" aria-hidden="true">▦</span>
-              <span>Placeholder</span><span class="block-dimensions">{block.rect.width} × {block.rect.height} cells</span></span>
-          </button>
+            <button type="button" class="block-select" data-testid="select-block" aria-describedby="layout-instructions"
+              aria-label={`Select ${block.title}`} aria-pressed={selectedId === block.id}
+              onclick={() => { if (!panTool) selectBlock(block.id); }}>
+              <span class="block-header" data-drag-block={block.id} title="Drag to move">
+                <span class="block-title" data-testid="block-title">{block.title}</span><span class="block-id">#{block.id}</span></span>
+              <span class="block-content"><span class="placeholder-symbol" aria-hidden="true">▦</span>
+                <span>Placeholder</span><span class="block-dimensions">{block.rect.width} × {block.rect.height} cells</span></span>
+            </button>
+            <button type="button" class="resize-handle" data-resize-block={block.id} aria-describedby="layout-instructions"
+              aria-label={`Resize ${block.title} from bottom right`} title="Drag to resize; Shift+arrows with keyboard"
+              onclick={() => { if (!panTool) selectBlock(block.id); }}>↘</button>
+          </div>
         {/each}
+        {#if placement}
+          <div class="placement-preview" class:invalid={!!previewError} data-testid="placement-preview" aria-hidden="true"
+            style:left={`${placement.candidate.x * snapshot.grid.cell_px}px`}
+            style:top={`${placement.candidate.y * snapshot.grid.cell_px}px`}
+            style:width={`${Math.max(1, placement.candidate.width) * snapshot.grid.cell_px}px`}
+            style:height={`${Math.max(1, placement.candidate.height) * snapshot.grid.cell_px}px`}>
+            <span>{previewError ?? `${placement.kind === 'move' ? 'Move' : 'Resize'}: ${placement.candidate.x}, ${placement.candidate.y} · ${placement.candidate.width} × ${placement.candidate.height} cells`}</span>
+          </div>
+        {/if}
       </div>
     {/if}
   </main>
 
   <footer class="statusbar">
+    <span id="layout-instructions" class="sr-only">With Pan tool off, drag a block header to move or its bottom-right handle to resize.
+      Focus and select a block, then use arrows to move or Shift+arrows to resize; Escape cancels a preview.</span>
     <span role="status" aria-live="polite" data-testid="workspace-status">
-      {#if loading}Loading workspace…{:else if needsReload}Workspace needs reload
+      {#if placement}{previewError ?? 'Placement preview; release to apply, Escape to cancel.'}
+      {:else if loading}Loading workspace…{:else if needsReload}Workspace needs reload
       {:else if pending}Updating workspace…{:else if snapshot}✓ Workspace loaded{:else}Workspace unavailable{/if}
     </span>
     {#if snapshot}

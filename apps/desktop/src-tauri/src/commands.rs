@@ -76,6 +76,24 @@ struct RemoveRequest {
     block_id: WireU64,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlaceRequest {
+    api_version: u32,
+    expected_revision: WireU64,
+    block_id: WireU64,
+    rect: PlaceRect,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlaceRect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
 fn decode<T: DeserializeOwned>(body: &InvokeBody) -> Result<T, CommandError> {
     let InvokeBody::Raw(bytes) = body else {
         return Err(CommandError::new(
@@ -200,6 +218,34 @@ impl WorkspaceHost {
             .remove(BlockId(u64::from(request.block_id)))
             .ok_or_else(|| layout_error(LayoutError::MissingBlock))?;
         self.revision = revision;
+        Ok(None)
+    }
+
+    pub fn place(&mut self, body: &InvokeBody) -> MutationResult {
+        let result = self.place_validated(body);
+        self.response(result)
+    }
+
+    fn place_validated(&mut self, body: &InvokeBody) -> Result<Option<WireU64>, CommandError> {
+        let request: PlaceRequest = decode(body)?;
+        let revision = self.validate(request.api_version, request.expected_revision)?;
+        let rect = GridRect::new(
+            request.rect.x,
+            request.rect.y,
+            request.rect.width,
+            request.rect.height,
+        )
+        .map_err(|_| CommandError::new("invalid_input", "Use at least 1 × 1 cell."))?;
+        let id = BlockId(u64::from(request.block_id));
+        let original = self
+            .workspace
+            .get(id)
+            .ok_or_else(|| layout_error(LayoutError::MissingBlock))?
+            .rect();
+        self.workspace.place(id, rect).map_err(layout_error)?;
+        if rect != original {
+            self.revision = revision;
+        }
         Ok(None)
     }
 }
@@ -417,5 +463,173 @@ mod tests {
             "limit_exceeded",
             true,
         );
+    }
+
+    fn place(revision: u64, id: &str, rect: Value) -> InvokeBody {
+        raw(
+            json!({"api_version":1,"expected_revision":revision.to_string(),"block_id":id,"rect":rect}),
+        )
+    }
+
+    fn rejected_place(host: &mut WorkspaceHost, body: InvokeBody, code: &str) {
+        let before = host.clone();
+        let response = value(host.place(&body));
+        assert_eq!(response["status"], "error");
+        assert_eq!(response["error"]["code"], code);
+        assert_eq!(
+            response["snapshot"],
+            serde_json::to_value(before.snapshot()).unwrap()
+        );
+        assert_eq!(
+            *host, before,
+            "rejection preserves every placement, revision and next ID"
+        );
+    }
+
+    #[test]
+    fn placement_commits_once_without_changing_identity_neighbors_or_next_id() {
+        let mut host = WorkspaceHost::default();
+        let seed = serde_json::to_value(host.snapshot()).unwrap();
+        let target = json!({"x":1,"y":9,"width":14,"height":9});
+        let result = value(host.place(&place(0, "1", target.clone())));
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["snapshot"]["revision"], "1");
+        assert_eq!(result["snapshot"]["blocks"][0]["rect"], target);
+        assert_eq!(
+            result["snapshot"]["blocks"][0]["title"],
+            seed["blocks"][0]["title"]
+        );
+        assert_eq!(result["snapshot"]["blocks"][1], seed["blocks"][1]);
+        assert_eq!(host.next_id, Some(3));
+        assert_eq!(
+            value(host.place(&place(1, "1", target)))["snapshot"]["revision"],
+            "1",
+            "no-op preserves revision"
+        );
+        let minimum = json!({"x":47,"y":31,"width":1,"height":1});
+        assert_eq!(value(host.place(&place(1, "1", minimum)))["status"], "ok");
+    }
+
+    #[test]
+    fn placement_rejects_collision_bounds_missing_stale_and_exhaustion_atomically() {
+        let mut host = WorkspaceHost::default();
+        rejected_place(
+            &mut host,
+            place(0, "1", json!({"x":1,"y":0,"width":12,"height":8})),
+            "collision",
+        );
+        rejected_place(
+            &mut host,
+            place(0, "1", json!({"x":48,"y":0,"width":1,"height":1})),
+            "out_of_bounds",
+        );
+        rejected_place(
+            &mut host,
+            place(
+                0,
+                "1",
+                json!({"x":u32::MAX,"y":0,"width":u32::MAX,"height":1}),
+            ),
+            "out_of_bounds",
+        );
+        rejected_place(
+            &mut host,
+            place(0, "1", json!({"x":0,"y":0,"width":0,"height":1})),
+            "invalid_input",
+        );
+        rejected_place(
+            &mut host,
+            place(0, "99", json!({"x":0,"y":9,"width":1,"height":1})),
+            "not_found",
+        );
+        assert_eq!(
+            value(host.place(&place(0, "1", json!({"x":0,"y":8,"width":12,"height":8}))))["status"],
+            "ok"
+        );
+        rejected_place(
+            &mut host,
+            place(0, "1", json!({"x":0,"y":10,"width":12,"height":8})),
+            "stale_revision",
+        );
+        host.revision = u64::MAX;
+        rejected_place(
+            &mut host,
+            place(u64::MAX, "1", json!({"x":0,"y":10,"width":12,"height":8})),
+            "limit_exceeded",
+        );
+    }
+
+    #[test]
+    fn placement_decoding_preserves_trust_boundary() {
+        let mut host = WorkspaceHost::default();
+        let valid = json!({"x":0,"y":9,"width":12,"height":8});
+        for rect in [
+            json!({"x":-1,"y":0,"width":1,"height":1}),
+            json!({"x":0.5,"y":0,"width":1,"height":1}),
+            json!({"x":0,"y":0,"width":1,"height":1,"extra":1}),
+            json!({"x":0,"y":0,"width":4294967296u64,"height":1}),
+            json!({}),
+        ] {
+            rejected_place(&mut host, place(0, "1", rect), "invalid_input");
+        }
+        for field in ["block_id", "expected_revision"] {
+            for invalid in [json!(1), json!("01"), json!("18446744073709551616")] {
+                let mut request =
+                    json!({"api_version":1,"expected_revision":"0","block_id":"1","rect":valid});
+                request[field] = invalid;
+                rejected_place(&mut host, raw(request), "invalid_input");
+            }
+        }
+        rejected_place(
+            &mut host,
+            raw(json!({"api_version":2,"expected_revision":"0","block_id":"1","rect":valid})),
+            "unsupported_version",
+        );
+        rejected_place(
+            &mut host,
+            raw(
+                json!({"api_version":1,"expected_revision":"0","block_id":"1","rect":valid,"extra":1}),
+            ),
+            "invalid_input",
+        );
+        rejected_place(&mut host,InvokeBody::Raw(br#"{"api_version":1,"expected_revision":"0","block_id":"1","rect":{"x":0,"x":1,"y":9,"width":1,"height":1}}"#.to_vec()),"invalid_input");
+        rejected_place(&mut host, InvokeBody::Json(json!({})), "invalid_input");
+        rejected_place(&mut host, InvokeBody::Raw(vec![255]), "invalid_input");
+        rejected_place(
+            &mut host,
+            InvokeBody::Raw(vec![b' '; MAX_PAYLOAD + 1]),
+            "limit_exceeded",
+        );
+    }
+
+    #[test]
+    fn concurrent_placements_with_one_revision_commit_only_once() {
+        use std::sync::{Arc, Mutex};
+        let host = Arc::new(Mutex::new(WorkspaceHost::default()));
+        let handles: Vec<_> = (8..10)
+            .map(|y| {
+                let host = Arc::clone(&host);
+                std::thread::spawn(move || {
+                    value(host.lock().unwrap().place(&place(
+                        0,
+                        "1",
+                        json!({"x":0,"y":y,"width":12,"height":8}),
+                    )))
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|r| r["status"] == "ok").count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| r["error"]["code"] == "stale_revision")
+                .count(),
+            1
+        );
+        assert_eq!(host.lock().unwrap().revision, 1);
     }
 }

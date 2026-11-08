@@ -4,6 +4,7 @@ fn main() {
             "get_layout_snapshot",
             "add_placeholder",
             "remove_placement",
+            "place_block",
         ]),
     ))
     .expect("failed to build the desktop host");
