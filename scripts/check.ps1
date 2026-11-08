@@ -14,7 +14,7 @@ New-Item -ItemType Directory -Path $output -Force | Out-Null
 
 function Get-SourceInventory {
     $files = @(Get-ChildItem -LiteralPath $root -File -Force)
-    foreach ($directory in @('crates', 'apps', 'docs', 'fixtures', 'prompts', 'scripts')) {
+    foreach ($directory in @('crates', 'apps', 'tools', 'docs', 'fixtures', 'prompts', 'scripts')) {
         $path = Join-Path $root $directory
         if (Test-Path -LiteralPath $path) {
             $pending = [Collections.Generic.Stack[string]]::new()
@@ -58,7 +58,7 @@ $record = [ordered]@{
         cargo = $null
         rustc = $null
     }
-    source = [ordered]@{ scope = 'root files + crates/apps/docs/fixtures/prompts/scripts; source extensions only; generated/dependency trees excluded'; manifest = 'source.sha256'; sha256 = $null }
+    source = [ordered]@{ scope = 'root files + crates/apps/tools/docs/fixtures/prompts/scripts; source extensions only; generated/dependency trees excluded'; manifest = 'source.sha256'; sha256 = $null }
     git = [ordered]@{ result = 'UNAVAILABLE'; head = $null; status = $null; diagnostic = $null }
     checks = $checks
     limits = @('Core model only; native UI, PTY, human evaluation and performance NOT RUN.')

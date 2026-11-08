@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/omniterm-core", "apps/desktop/src-tauri"]
+members = ["crates/omniterm-core", "apps/desktop/src-tauri", "tools/desktop-test-host"]
 default-members = ["crates/omniterm-core"]
 resolver = "2"
 

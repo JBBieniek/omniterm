@@ -2055,6 +2055,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "omniterm-test-host"
+version = "0.1.0"
+dependencies = [
+ "omniterm-core",
+ "omniterm-desktop",
+ "serde",
+ "serde_json",
+ "tauri",
+ "webview2-com",
+ "windows",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

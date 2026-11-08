@@ -5,9 +5,11 @@ $runner = Join-Path $PSScriptRoot 'check.ps1'
 $fixture = Join-Path $PSScriptRoot ("../artifacts/local/runner-contract-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Path "$fixture/scripts", "$fixture/tools" -Force | Out-Null
 New-Item -ItemType Directory -Path "$fixture/apps/desktop/node_modules", "$fixture/apps/desktop/src-tauri/gen" -Force | Out-Null
+New-Item -ItemType Directory -Path "$fixture/tools/desktop-test-host/src" -Force | Out-Null
 Copy-Item -LiteralPath $runner -Destination "$fixture/scripts/check.ps1"
 Set-Content -LiteralPath "$fixture/untracked.rs" -Value '// source identity fixture'
 Set-Content -LiteralPath "$fixture/apps/desktop/App.svelte" -Value '<h1>fixture UI</h1>'
+Set-Content -LiteralPath "$fixture/tools/desktop-test-host/src/automation.rs" -Value '// test host source fixture'
 Set-Content -LiteralPath "$fixture/apps/desktop/node_modules/generated.js" -Value 'excluded dependency'
 Set-Content -LiteralPath "$fixture/apps/desktop/src-tauri/gen/generated.json" -Value '{}'
 Set-Content -LiteralPath "$fixture/tools/cargo.cmd" -Value @'
@@ -40,6 +42,8 @@ try {
     Assert ((Get-Content "$fixture/pass/source.sha256" -Raw) -match 'untracked.rs') 'Untracked source must be fingerprinted.'
     $manifest = Get-Content "$fixture/pass/source.sha256" -Raw
     Assert ($manifest -match 'apps/desktop/App.svelte') 'Desktop source must be fingerprinted.'
+    Assert ($manifest -match 'tools/desktop-test-host/src/automation.rs') 'Separate test host source must be fingerprinted.'
+    Assert ($passed.source.scope -match 'apps/tools/docs') 'Recorded source scope must include the test host root.'
     Assert ($manifest -notmatch 'generated') 'Generated and dependency trees must be excluded.'
     Assert ($passed.checks[1].command -match '-p omniterm-core') 'Core checks must remain independent of native packages.'
     Assert ($passed.git.result -eq 'UNAVAILABLE') 'Unavailable Git must be explicit.'
