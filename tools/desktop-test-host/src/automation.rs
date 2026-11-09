@@ -300,6 +300,7 @@ const OBSERVE: &str = r#"(async () => {
   controls: { title: control('placeholder-title'), add: control('add-placeholder'), remove: control('remove-placement'),
     new_terminal: control('new-terminal'), reopen: control('reopen-terminal'), terminate: control('terminate-session'),
     cancel_quit: control('cancel-quit'), confirm_quit: control('confirm-quit'),
+    show_text: control('show-opened-text'),
     pan: control('pan-tool'), zoom_in: control('zoom-in'), zoom_out: control('zoom-out'), reset: control('reset-view') },
   camera: matrix ? {zoom: matrix.a * 100, origin: {x: -matrix.e / matrix.a, y: -matrix.f / matrix.d}} : null,
   viewport: viewport ? {...bounds(viewport), scroll_x: viewport.scrollLeft, scroll_y: viewport.scrollTop} : null,
@@ -330,6 +331,12 @@ const OBSERVE: &str = r#"(async () => {
     error: element.querySelector('.terminal-error')?.textContent ?? ''
   })),
   quit_dialog: !!document.querySelector('dialog[open]'),
+  text_views: [...document.querySelectorAll('[data-text-block-id]')].slice(0,8).map(element => ({
+    id: element.dataset.textBlockId, source:element.querySelector('.text-source')?.textContent ?? '',
+    content:element.querySelector('[data-testid="text-content"]')?.textContent?.slice(0,4096) ?? null,
+    length:element.querySelector('[data-testid="text-content"]')?.textContent?.length ?? null,
+    viewport:bounds(element), injected_elements:element.querySelectorAll('script,img,iframe,svg').length
+  })),
   status: document.querySelector('[data-testid="workspace-status"]')?.textContent?.trim().slice(0, 256) ?? null,
   block_count: document.querySelector('[data-testid="block-count"]')?.textContent?.trim().slice(0, 256) ?? null,
   grid: document.querySelector('[data-testid="grid-dimensions"]')?.textContent?.trim().slice(0, 256) ?? null,

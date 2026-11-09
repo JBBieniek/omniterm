@@ -5,9 +5,21 @@ use tauri::State;
 use tauri::{Emitter, Manager};
 
 pub mod commands;
+pub mod open_call;
 pub mod snapshot;
 pub mod terminal;
 mod terminal_commands;
+
+#[tauri::command]
+fn get_text_block(
+    request: Request<'_>,
+    workspace: State<'_, Mutex<WorkspaceHost>>,
+) -> Result<open_call::TextDocument, commands::CommandError> {
+    workspace
+        .lock()
+        .map_err(|_| commands::CommandError::new("internal_error", "Workspace unavailable."))?
+        .text_block(request.body())
+}
 
 #[tauri::command]
 async fn terminal_command(
@@ -83,7 +95,8 @@ pub fn application() -> tauri::Result<tauri::App<tauri::Wry>> {
             add_placeholder,
             remove_placement,
             place_block,
-            terminal_command
+            terminal_command,
+            get_text_block
         ])
         .build(tauri::generate_context!())
 }

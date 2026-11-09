@@ -88,8 +88,10 @@ pub fn dispatch(app: &tauri::AppHandle, body: &InvokeBody) -> Reply {
                 let mut workspace = workspace
                     .lock()
                     .map_err(|_| runtime_error("Workspace unavailable."))?;
-                workspace.check_terminal_room(expected_revision)?;
-                let id = runtime.start().map_err(runtime_error)?;
+                workspace.check_content_room(expected_revision)?;
+                let id = runtime
+                    .start_with_helper(app.clone())
+                    .map_err(runtime_error)?;
                 match workspace.attach_terminal(id, expected_revision) {
                     Ok(block) => response.block_id = Some(block),
                     Err(error) => {

@@ -9,6 +9,31 @@ use windows::Win32::System::JobObjects::{
 pub(super) struct ProcessJob(OwnedHandle);
 
 impl ProcessJob {
+    pub fn contains(&self, pid: u32) -> bool {
+        use windows::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+        use windows::Win32::System::JobObjects::IsProcessInJob;
+        use windows::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_SYNCHRONIZE,
+        };
+        // SAFETY: OS-reported peer PID, held live process handle, and our owned job.
+        unsafe {
+            let Ok(process) = OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                false,
+                pid,
+            ) else {
+                return false;
+            };
+            let mut inside = windows::core::BOOL::default();
+            let allowed = WaitForSingleObject(process, 0) == WAIT_TIMEOUT
+                && IsProcessInJob(process, Some(HANDLE(self.0.as_raw_handle())), &mut inside)
+                    .is_ok()
+                && inside.as_bool();
+            let _ = CloseHandle(process);
+            allowed
+        }
+    }
     pub fn attach(process: RawHandle) -> windows::core::Result<Self> {
         // SAFETY: new job handle is uniquely owned, child handle is borrowed
         // from the live portable-pty Child, and the limit structure has its ABI size.

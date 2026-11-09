@@ -40,6 +40,12 @@ input { min-width: 100px; width: 180px; border: 1px solid var(--line); backgroun
 .block-select:focus-visible { outline: none; }
 .terminal-block { display: flex; flex-direction: column; }
 .terminal-block .block-select { height: auto; flex: none; }
+.text-block { display: flex; flex-direction: column; }
+.text-block .block-select { height: auto; flex: none; }
+.text-view { display: flex; flex-direction: column; flex: 1; min-height: 0; padding: 8px; overflow: hidden; }
+.text-source { flex: none; font-size: 11px; color: var(--secondary); overflow-wrap: anywhere; }
+.text-view [data-testid="text-content"] { flex: 1; min-height: 0; margin: 8px 0 0; overflow: auto; white-space: pre; font: 14px/20px Consolas, monospace; }
+.text-view [data-testid="text-content"]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .session-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; width: 100%; font-size: 12px; }
 select { font: inherit; color: inherit; background: var(--chrome); padding: 6px; max-width: 160px; }
 .terminal { flex: 1; min-height: 0; display: flex; flex-direction: column; background: #0c0c0c; color: #d4d4d4; }

@@ -60,6 +60,15 @@ struct BlockSnapshot {
     rect: RectSnapshot,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<WireU64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<TextMetadata>,
+}
+
+#[derive(Debug, Serialize)]
+struct TextMetadata {
+    source_session_id: WireU64,
+    path: String,
+    bytes: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -87,6 +96,7 @@ impl LayoutSnapshotV1 {
                     let rect = block.rect();
                     BlockSnapshot {
                         session_id: None,
+                        text: None,
                         id: block.id().0.into(),
                         title: block.title().to_owned(),
                         rect: RectSnapshot {
@@ -107,6 +117,21 @@ impl LayoutSnapshotV1 {
                 .get(&BlockId(u64::from(block.id)))
                 .copied()
                 .map(Into::into);
+        }
+        self
+    }
+    pub(crate) fn with_text(
+        mut self,
+        documents: &BTreeMap<BlockId, crate::open_call::TextDocument>,
+    ) -> Self {
+        for block in &mut self.blocks {
+            block.text = documents
+                .get(&BlockId(block.id.into()))
+                .map(|doc| TextMetadata {
+                    source_session_id: doc.source_session_id,
+                    path: doc.path.clone(),
+                    bytes: doc.bytes,
+                });
         }
         self
     }

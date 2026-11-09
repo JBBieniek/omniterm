@@ -372,6 +372,8 @@ struct Control {
 struct Session {
     state: Arc<Mutex<TerminalState>>,
     control: Arc<Mutex<Control>>,
+    #[cfg(windows)]
+    open_access: Option<Arc<crate::open_call::windows::Access>>,
 }
 #[derive(Default)]
 struct Sessions {
@@ -514,6 +516,10 @@ impl TerminalHost {
     }
     pub fn terminate(&self, id: u64) -> Result<(), &'static str> {
         let session = self.get(id)?;
+        #[cfg(windows)]
+        if let Some(access) = &session.open_access {
+            access.revoke();
+        }
         {
             let mut state = session.state.lock().unwrap();
             if state.exit_code.is_some() {
@@ -563,6 +569,46 @@ impl TerminalHost {
     }
     #[cfg(windows)]
     pub fn start(&self) -> Result<u64, &'static str> {
+        self.start_inner(None)
+    }
+    pub(crate) fn start_with_helper(&self, app: tauri::AppHandle) -> Result<u64, &'static str> {
+        #[cfg(windows)]
+        {
+            self.start_inner(Some(app))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = app;
+            self.start()
+        }
+    }
+    #[cfg(windows)]
+    pub(crate) fn with_open_access<T>(
+        &self,
+        id: u64,
+        pid: u32,
+        action: impl FnOnce() -> Result<T, &'static str>,
+    ) -> Result<T, &'static str> {
+        let session = self.get(id)?;
+        let access = session
+            .open_access
+            .as_ref()
+            .ok_or("Session has no text-open authority.")?;
+        access.while_active(|| {
+            let control = session
+                .control
+                .lock()
+                .map_err(|_| "Session control unavailable.")?;
+            let allowed = control.job.as_ref().is_some_and(|job| job.contains(pid));
+            drop(control);
+            if !allowed {
+                return Err("Open caller is outside the authorized Session.");
+            }
+            action()
+        })
+    }
+    #[cfg(windows)]
+    fn start_inner(&self, app: Option<tauri::AppHandle>) -> Result<u64, &'static str> {
         let mut sessions = self.sessions.lock().unwrap();
         if sessions.closing {
             return Err("Terminal runtime is closing.");
@@ -584,6 +630,16 @@ impl TerminalHost {
         if !shell.is_file() || !cwd.is_dir() {
             return Err("The system PowerShell executable or working directory is unavailable.");
         }
+        let opening = if let Some(app) = app {
+            let helper = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|p| p.join("omni.exe")))
+                .filter(|p| p.is_file())
+                .ok_or("Build the sibling omni helper before starting a terminal.")?;
+            Some((crate::open_call::windows::Server::bind(&cwd)?, app, helper))
+        } else {
+            None
+        };
         let pair = portable_pty::native_pty_system()
             .openpty(PtySize {
                 rows: 24,
@@ -618,6 +674,19 @@ impl TerminalHost {
             }
         }
         command.env("TERM", "xterm-256color");
+        if let Some((server, _, helper)) = &opening {
+            let mut paths = vec![helper.parent().unwrap().to_owned()];
+            if let Some(path) = std::env::var_os("PATH") {
+                paths.extend(std::env::split_paths(&path));
+            }
+            command.env(
+                "PATH",
+                std::env::join_paths(paths)
+                    .map_err(|_| "Could not configure Session helper PATH.")?,
+            );
+            command.env("OMNITERM_OPEN_PIPE", &server.endpoint);
+            command.env("OMNITERM_HOST_PID", std::process::id().to_string());
+        }
         let mut reader = pair
             .master
             .try_clone_reader()
@@ -704,9 +773,14 @@ impl TerminalHost {
         });
         let waiter_state = state.clone();
         let waiter_control = control.clone();
+        let open_access = opening.as_ref().map(|(server, _, _)| server.access.clone());
+        let waiter_access = open_access.clone();
         std::thread::spawn(move || {
             {
                 let status = child.wait();
+                if let Some(access) = waiter_access {
+                    access.revoke();
+                }
                 let mut state = waiter_state.lock().unwrap();
                 match status {
                     Ok(status) => state.exit_code = Some(status.exit_code()),
@@ -724,9 +798,17 @@ impl TerminalHost {
         });
         let id = sessions.next_id;
         sessions.next_id = next;
-        sessions
-            .entries
-            .insert(id, Arc::new(Session { state, control }));
+        sessions.entries.insert(
+            id,
+            Arc::new(Session {
+                state,
+                control,
+                open_access,
+            }),
+        );
+        if let Some((server, app, _)) = opening {
+            server.start(app, id);
+        }
         Ok(id)
     }
 }

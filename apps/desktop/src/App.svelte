@@ -3,6 +3,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import TerminalView from './TerminalView.svelte';
+  import TextView from './TextView.svelte';
   import { terminalCommand } from './terminal';
   import type { Session } from './terminal';
   import type { Layout as LayoutSnapshotV1 } from './workspace';
@@ -26,6 +27,7 @@
   let sessions = $state<Session[]>([]);
   let sessionId = $state('');
   let quitDialog: HTMLDialogElement;
+  let openedId = $state<string | null>(null);
   let viewport: HTMLElement;
   let camera = $state<Camera>({origin: {x: 0, y: 0}, zoom: 100});
   let panTool = $state(false);
@@ -163,6 +165,7 @@
 
   function reconcile(next: LayoutSnapshotV1) {
     if (next.api_version !== 1) throw new Error('Unsupported workspace API version.');
+    if (snapshot && BigInt(next.revision) < BigInt(snapshot.revision)) return;
     snapshot = next;
     if (!next.blocks.some(block => block.id === selectedId)) selectedId = null;
   }
@@ -226,6 +229,20 @@
     } catch { error = 'Could not refresh Session status.'; }
   }
 
+  async function openedText(id: string) {
+    try {
+      reconcile(await invoke<LayoutSnapshotV1>('get_layout_snapshot'));
+      if (snapshot?.blocks.some(block => block.id === id && block.text)) openedId = id;
+    } catch { error = 'A file was opened, but the board could not refresh; reload the workspace.'; needsReload = true; }
+  }
+  function showOpened() {
+    const block = snapshot?.blocks.find(block => block.id === openedId);
+    if (!block || !snapshot) return;
+    cancelGestures();
+    selectBlock(block.id);
+    camera = {...camera, origin: {x: block.rect.x * snapshot.grid.cell_px, y: block.rect.y * snapshot.grid.cell_px}};
+  }
+
   async function terminalAction(op: 'start' | 'reopen' | 'terminate' | 'quit') {
     if (pending || !snapshot || (needsReload && op !== 'quit')) return;
     pending = true;
@@ -258,7 +275,8 @@
     void loadWorkspace();
     void refreshSessions();
     const listeners = [listen('request-quit', () => { if (!quitDialog.open) quitDialog.showModal(); }),
-      listen<string>('quit-failed', event => { error = event.payload; })];
+      listen<string>('quit-failed', event => { error = event.payload; }),
+      listen<string>('layout-changed', event => { void openedText(event.payload); })];
     void Promise.all(listeners).catch(() => { error = 'Could not subscribe to app quit confirmation; restart Omniterm.'; needsReload = true; });
     return () => { for (const listener of listeners) void listener.then(unlisten => unlisten(), () => {}); };
   });
@@ -337,6 +355,7 @@
         {#each snapshot.blocks as block (block.id)}
           <div class="block" class:selected={selectedId === block.id} data-block-id={block.id}
             class:terminal-block={!!block.session_id}
+            class:text-block={!!block.text}
             style:left={`${block.rect.x * snapshot.grid.cell_px}px`}
             style:top={`${block.rect.y * snapshot.grid.cell_px}px`}
             style:width={`${block.rect.width * snapshot.grid.cell_px}px`}
@@ -346,11 +365,12 @@
               onclick={() => { if (!panTool) selectBlock(block.id); }}>
               <span class="block-header" data-drag-block={block.id} title="Drag to move">
                 <span class="block-title" data-testid="block-title">{block.title}</span><span class="block-id">#{block.id}</span></span>
-              {#if !block.session_id}<span class="block-content"><span class="placeholder-symbol" aria-hidden="true">▦</span>
+              {#if !block.session_id && !block.text}<span class="block-content"><span class="placeholder-symbol" aria-hidden="true">▦</span>
                 <span>Placeholder</span><span class="block-dimensions">{block.rect.width} × {block.rect.height} cells</span></span>
               {/if}
             </button>
             {#if block.session_id}<TerminalView sessionId={block.session_id} onstate={refreshSessions} />{/if}
+            {#if block.text}<TextView blockId={block.id} />{/if}
             <button type="button" class="resize-handle" data-resize-block={block.id} aria-describedby="layout-instructions"
               aria-label={`Resize ${block.title} from bottom right`} title="Drag to resize; Shift+arrows with keyboard"
               onclick={() => { if (!panTool) selectBlock(block.id); }}>↘</button>
@@ -370,6 +390,9 @@
   </main>
 
   <footer class="statusbar">
+    {#if snapshot?.blocks.some(block => block.id === openedId && block.text)}
+      <button type="button" data-testid="show-opened-text" onclick={showOpened}>Show opened text</button>
+    {/if}
     <span id="layout-instructions" class="sr-only">With Pan tool off, drag a block header to move or its bottom-right handle to resize.
       Focus and select a block, then use arrows to move or Shift+arrows to resize; Escape cancels a preview.</span>
     <span role="status" aria-live="polite" data-testid="workspace-status">

@@ -14,6 +14,7 @@ pub struct WorkspaceHost {
     revision: u64,
     next_id: Option<u64>,
     session_bindings: BTreeMap<BlockId, u64>,
+    text_documents: BTreeMap<BlockId, crate::open_call::TextDocument>,
 }
 
 impl Default for WorkspaceHost {
@@ -33,6 +34,7 @@ impl Default for WorkspaceHost {
             revision: 0,
             next_id: Some(3),
             session_bindings: BTreeMap::new(),
+            text_documents: BTreeMap::new(),
         }
     }
 }
@@ -40,7 +42,7 @@ impl Default for WorkspaceHost {
 #[derive(Debug, Serialize)]
 pub struct CommandError {
     code: &'static str,
-    message: &'static str,
+    pub(crate) message: &'static str,
 }
 
 impl CommandError {
@@ -137,6 +139,7 @@ impl WorkspaceHost {
     pub fn snapshot(&self) -> LayoutSnapshotV1 {
         LayoutSnapshotV1::from_workspace(&self.workspace, self.revision)
             .with_sessions(&self.session_bindings)
+            .with_text(&self.text_documents)
     }
 
     fn validate(&self, version: u32, revision: WireU64) -> Result<u64, CommandError> {
@@ -223,6 +226,8 @@ impl WorkspaceHost {
             .ok_or_else(|| layout_error(LayoutError::MissingBlock))?;
         self.session_bindings
             .remove(&BlockId(u64::from(request.block_id)));
+        self.text_documents
+            .remove(&BlockId(u64::from(request.block_id)));
         self.revision = revision;
         Ok(None)
     }
@@ -261,7 +266,7 @@ impl WorkspaceHost {
         Ok(None)
     }
 
-    pub(crate) fn check_terminal_room(&self, revision: WireU64) -> Result<(), CommandError> {
+    pub(crate) fn check_content_room(&self, revision: WireU64) -> Result<(), CommandError> {
         self.validate(1, revision)?;
         if self.next_id.is_none() || self.workspace.blocks().count() >= MAX_BLOCKS {
             return Err(CommandError::new(
@@ -272,7 +277,7 @@ impl WorkspaceHost {
         self.workspace.first_fit(12, 8).ok_or_else(|| {
             CommandError::new(
                 "no_room",
-                "No room for a 12 × 8 terminal; remove a placement first.",
+                "No room for a 12 × 8 block; remove a placement first.",
             )
         })?;
         Ok(())
@@ -290,7 +295,7 @@ impl WorkspaceHost {
         {
             return Ok(id.0.into());
         }
-        self.check_terminal_room(expected)?;
+        self.check_content_room(expected)?;
         let id = self.next_id.unwrap();
         let rect = self.workspace.first_fit(12, 8).unwrap();
         self.workspace
@@ -305,11 +310,100 @@ impl WorkspaceHost {
         self.revision = revision;
         Ok(id.into())
     }
+
+    pub(crate) fn add_text(
+        &mut self,
+        document: crate::open_call::TextDocument,
+    ) -> Result<WireU64, CommandError> {
+        self.check_content_room(self.revision.into())?;
+        if self.text_documents.len() >= 8
+            || document.bytes > crate::open_call::MAX_TEXT
+            || document.text.len() > crate::open_call::MAX_TEXT
+        {
+            return Err(CommandError::new(
+                "limit_exceeded",
+                "Text storage limit reached; remove a text placement first.",
+            ));
+        }
+        let revision = self.validate(1, self.revision.into())?;
+        let id = self.next_id.unwrap();
+        let rect = self.workspace.first_fit(12, 8).unwrap();
+        let name = std::path::Path::new(&document.path)
+            .file_name()
+            .and_then(|p| p.to_str())
+            .unwrap_or("Text");
+        let title = name
+            .chars()
+            .scan(0, |bytes, c| {
+                *bytes += c.len_utf8();
+                (*bytes <= MAX_TITLE).then_some(c)
+            })
+            .collect::<String>();
+        self.workspace
+            .add(Block::new(BlockId(id), rect, title))
+            .map_err(layout_error)?;
+        self.text_documents.insert(BlockId(id), document);
+        self.next_id = id.checked_add(1);
+        self.revision = revision;
+        Ok(id.into())
+    }
+    pub(crate) fn text_block(
+        &self,
+        body: &InvokeBody,
+    ) -> Result<crate::open_call::TextDocument, CommandError> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct TextRequest {
+            api_version: u32,
+            block_id: WireU64,
+        }
+        let request: TextRequest = decode(body)?;
+        if request.api_version != 1 {
+            return Err(CommandError::new(
+                "unsupported_version",
+                "Unsupported text API version.",
+            ));
+        }
+        self.text_documents
+            .get(&BlockId(request.block_id.into()))
+            .cloned()
+            .ok_or_else(|| CommandError::new("not_found", "That text placement no longer exists."))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_storage_is_atomic_bounded_inert_and_removed_with_placement() {
+        let mut host = WorkspaceHost::default();
+        let document = crate::open_call::TextDocument {
+            source_session_id: 7.into(),
+            path: "sub/<img src=x>.txt".into(),
+            bytes: 5,
+            text: "hello".into(),
+        };
+        let id = host.add_text(document.clone()).unwrap();
+        let body = InvokeBody::Raw(
+            format!(r#"{{"api_version":1,"block_id":"{}"}}"#, u64::from(id)).into_bytes(),
+        );
+        assert_eq!(host.text_block(&body).unwrap(), document);
+        let value = serde_json::to_value(host.snapshot()).unwrap();
+        assert_eq!(value["blocks"][2]["text"]["source_session_id"], "7");
+        assert!(value["blocks"][2]["text"].get("text").is_none());
+        for _ in 1..8 {
+            host.add_text(document.clone()).unwrap();
+        }
+        let before = host.clone();
+        assert!(host.add_text(document).is_err());
+        assert_eq!(host, before);
+        let id = u64::from(id).to_string();
+        let revision = host.revision;
+        host.remove(&remove(revision, &id));
+        assert!(host.text_block(&body).is_err());
+        assert_eq!(host.text_documents.len(), 7);
+    }
     use serde_json::{json, Value};
     use tauri::ipc::InvokeBody;
 
