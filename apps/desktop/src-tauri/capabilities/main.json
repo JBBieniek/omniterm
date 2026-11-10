@@ -3,5 +3,5 @@
   "identifier": "main-workspace",
   "description": "Only the local main window may edit placements, control terminals and receive quit events.",
   "windows": ["main"],
-  "permissions": ["allow-get-layout-snapshot", "allow-add-placeholder", "allow-remove-placement", "allow-place-block", "allow-terminal-command", "allow-get-text-block", "core:event:allow-listen", "core:event:allow-unlisten"]
+  "permissions": ["allow-get-layout-snapshot", "allow-add-placeholder", "allow-remove-placement", "allow-place-block", "allow-terminal-command", "allow-get-text-block", "allow-git-command", "core:event:allow-listen", "core:event:allow-unlisten"]
 }

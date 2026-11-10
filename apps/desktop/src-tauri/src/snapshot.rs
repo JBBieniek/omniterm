@@ -61,6 +61,8 @@ struct BlockSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<WireU64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    git_task_id: Option<WireU64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<TextMetadata>,
 }
 
@@ -96,6 +98,7 @@ impl LayoutSnapshotV1 {
                     let rect = block.rect();
                     BlockSnapshot {
                         session_id: None,
+                        git_task_id: None,
                         text: None,
                         id: block.id().0.into(),
                         title: block.title().to_owned(),
@@ -111,6 +114,15 @@ impl LayoutSnapshotV1 {
         }
     }
 
+    pub(crate) fn with_git(mut self, bindings: &BTreeMap<BlockId, u64>) -> Self {
+        for block in &mut self.blocks {
+            block.git_task_id = bindings
+                .get(&BlockId(block.id.into()))
+                .copied()
+                .map(Into::into);
+        }
+        self
+    }
     pub(crate) fn with_sessions(mut self, bindings: &BTreeMap<BlockId, u64>) -> Self {
         for block in &mut self.blocks {
             block.session_id = bindings

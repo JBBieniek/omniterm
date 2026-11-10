@@ -1,7 +1,6 @@
 use super::{
     decode, relative_path, text_bytes, Reply, Request, TextDocument, MAX_REQUEST, MAX_TEXT,
 };
-use crate::snapshot::WireU64;
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::os::windows::{
@@ -146,8 +145,59 @@ fn final_path(file: &File) -> Result<PathBuf, &'static str> {
 pub(crate) struct Root {
     file: File,
     path: PathBuf,
+    ceiling: PathBuf,
 }
 impl Root {
+    pub(crate) fn git_ceiling(&self) -> Result<PathBuf, &'static str> {
+        let path = crate::terminal::shell_directory(self.ceiling.clone());
+        if path.to_string_lossy().contains(';') {
+            return Err("Semicolons in the Git discovery ceiling are unsupported.");
+        }
+        Ok(path)
+    }
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+    pub(crate) fn verify(&self) -> Result<(), &'static str> {
+        if final_path(&self.file)? != self.path {
+            return Err("Authorized directory moved; create a new run from the Session.");
+        }
+        Ok(())
+    }
+    pub(crate) fn directory(&self, cwd: &str) -> Result<Arc<Self>, &'static str> {
+        self.verify()?;
+        let path = Path::new(cwd);
+        if cwd.chars().any(char::is_control)
+            || path.components().any(|c| matches!(c, Component::ParentDir))
+        {
+            return Err("Invalid helper cwd.");
+        }
+        let relative = path
+            .strip_prefix(&self.path)
+            .map_err(|_| "Helper cwd is outside the authorized root.")?;
+        let mut candidate = self.path.clone();
+        for part in relative.components() {
+            if !matches!(part, Component::Normal(_)) {
+                return Err("Invalid helper cwd.");
+            }
+            candidate.push(part);
+            if std::fs::symlink_metadata(&candidate)
+                .map_err(|_| "Cwd unavailable.")?
+                .file_attributes()
+                & FILE_ATTRIBUTE_REPARSE_POINT.0
+                != 0
+            {
+                return Err("Reparse-point cwd is not supported.");
+            }
+        }
+        let mut root = Self::open(path)?;
+        root.ceiling = self.ceiling.clone();
+        if !final_path(&root.file)?.starts_with(final_path(&self.file)?) {
+            return Err("Cwd handle is outside authorized root.");
+        }
+        root.verify()?;
+        Ok(Arc::new(root))
+    }
     pub fn open(path: &Path) -> Result<Self, &'static str> {
         let path = path
             .canonicalize()
@@ -169,7 +219,12 @@ impl Root {
         {
             return Err("Open root must be a directory.");
         }
-        Ok(Self { file, path })
+        let ceiling = path.parent().unwrap_or(&path).to_owned();
+        Ok(Self {
+            file,
+            path,
+            ceiling,
+        })
     }
     pub fn read(&self, request: &Request, session: u64) -> Result<TextDocument, &'static str> {
         relative_path(Path::new(&request.path))?;
@@ -305,6 +360,37 @@ impl Server {
                     let bytes = receive(&self.pipe, Some(&self.access), MAX_REQUEST, 2000)?;
                     authorized?; // Drain a bounded frame before a denial, without parsing it.
                     let request = decode(&bytes)?;
+                    if matches!(request.op, super::Operation::GitStatus) {
+                        let source = self.root.directory(&request.cwd)?;
+                        let (id, task_id) = runtime.with_open_access(session, pid, || {
+                            let workspace = app.state::<Mutex<crate::commands::WorkspaceHost>>();
+                            let mut workspace =
+                                workspace.lock().map_err(|_| "Workspace unavailable.")?;
+                            let revision = workspace.current_revision();
+                            workspace
+                                .check_content_room(revision)
+                                .map_err(|e| e.message)?;
+                            let host = app.state::<crate::git_task::GitHost>();
+                            let task = host.start(source, session)?;
+                            let block = workspace
+                                .attach_git(task, revision)
+                                .map_err(|e| e.message)?;
+                            Ok((block, task))
+                        })?;
+                        let _ = app.emit("layout-changed", id);
+                        loop {
+                            let task =
+                                app.state::<crate::git_task::GitHost>().completed(task_id)?;
+                            if let Some(task) = task {
+                                return Ok(Reply::Git {
+                                    block_id: id,
+                                    task: Box::new(task),
+                                });
+                            }
+                            self.access.while_active(|| Ok(()))?;
+                            std::thread::sleep(Duration::from_millis(25));
+                        }
+                    }
                     let document = self.root.read(&request, session)?;
                     let id = runtime.with_open_access(session, pid, || {
                         app.state::<Mutex<crate::commands::WorkspaceHost>>()
@@ -314,10 +400,10 @@ impl Server {
                             .map_err(|error| error.message)
                     })?;
                     let _ = app.emit("layout-changed", id);
-                    Ok::<WireU64, &'static str>(id)
+                    Ok::<Reply, &'static str>(Reply::Ok { block_id: id })
                 })();
                 let reply = match result {
-                    Ok(block_id) => Reply::Ok { block_id },
+                    Ok(reply) => reply,
                     Err(error) => Reply::Error {
                         error: error.into(),
                     },
@@ -385,7 +471,12 @@ pub(crate) fn client(request: &Request) -> Result<Reply, String> {
         return Err("Open request exceeds 16 KiB.".into());
     }
     send(&pipe, None, &bytes)?;
-    let bytes = receive(&pipe, None, 1024, 5000)?;
+    let (limit, timeout) = if matches!(request.op, super::Operation::GitStatus) {
+        (2 * 1024 * 1024, 35000)
+    } else {
+        (1024, 5000)
+    };
+    let bytes = receive(&pipe, None, limit, timeout)?;
     let reply = serde_json::from_slice(&bytes)
         .map_err(|_| "Invalid open response; request was not retried.")?;
     send(&pipe, None, &[1])?;

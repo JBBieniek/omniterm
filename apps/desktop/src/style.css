@@ -42,6 +42,16 @@ input { min-width: 100px; width: 180px; border: 1px solid var(--line); backgroun
 .terminal-block .block-select { height: auto; flex: none; }
 .text-block { display: flex; flex-direction: column; }
 .text-block .block-select { height: auto; flex: none; }
+.git-block { display: flex; flex-direction: column; }
+.git-block .block-select { height: auto; flex: none; }
+.git-view { flex: 1; min-height: 0; overflow: auto; padding: 10px 12px 36px; display: flex; flex-direction: column; gap: 10px; }
+.git-source, .git-outcome { font-size: 11px; color: var(--secondary); overflow-wrap: anywhere; }
+.git-counts, .git-actions, .git-retained { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.git-counts span { background: var(--chrome); border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; font-size: 13px; }
+.git-counts strong { padding-left: 8px; font-size: 18px; }
+.git-view pre, .git-raw { white-space: pre; overflow: auto; flex: none; font: 12px/18px Consolas, monospace; }
+.git-view details { font-size: 11px; }
+.git-retained button { padding: 3px 8px; }
 .text-view { display: flex; flex-direction: column; flex: 1; min-height: 0; padding: 8px; overflow: hidden; }
 .text-source { flex: none; font-size: 11px; color: var(--secondary); overflow-wrap: anywhere; }
 .text-view [data-testid="text-content"] { flex: 1; min-height: 0; margin: 8px 0 0; overflow: auto; white-space: pre; font: 14px/20px Consolas, monospace; }

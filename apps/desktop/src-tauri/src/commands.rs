@@ -14,6 +14,7 @@ pub struct WorkspaceHost {
     revision: u64,
     next_id: Option<u64>,
     session_bindings: BTreeMap<BlockId, u64>,
+    git_bindings: BTreeMap<BlockId, u64>,
     text_documents: BTreeMap<BlockId, crate::open_call::TextDocument>,
 }
 
@@ -34,6 +35,7 @@ impl Default for WorkspaceHost {
             revision: 0,
             next_id: Some(3),
             session_bindings: BTreeMap::new(),
+            git_bindings: BTreeMap::new(),
             text_documents: BTreeMap::new(),
         }
     }
@@ -140,6 +142,7 @@ impl WorkspaceHost {
         LayoutSnapshotV1::from_workspace(&self.workspace, self.revision)
             .with_sessions(&self.session_bindings)
             .with_text(&self.text_documents)
+            .with_git(&self.git_bindings)
     }
 
     fn validate(&self, version: u32, revision: WireU64) -> Result<u64, CommandError> {
@@ -228,6 +231,8 @@ impl WorkspaceHost {
             .remove(&BlockId(u64::from(request.block_id)));
         self.text_documents
             .remove(&BlockId(u64::from(request.block_id)));
+        self.git_bindings
+            .remove(&BlockId(u64::from(request.block_id)));
         self.revision = revision;
         Ok(None)
     }
@@ -266,6 +271,32 @@ impl WorkspaceHost {
         Ok(None)
     }
 
+    pub(crate) fn current_revision(&self) -> WireU64 {
+        self.revision.into()
+    }
+    pub(crate) fn attach_git(
+        &mut self,
+        task: u64,
+        expected: WireU64,
+    ) -> Result<WireU64, CommandError> {
+        let revision = self.validate(1, expected)?;
+        if let Some((id, _)) = self.git_bindings.iter().find(|(_, value)| **value == task) {
+            return Ok(id.0.into());
+        }
+        self.check_content_room(expected)?;
+        let id = self.next_id.unwrap();
+        self.workspace
+            .add(Block::new(
+                BlockId(id),
+                self.workspace.first_fit(12, 8).unwrap(),
+                format!("Git status #{task}"),
+            ))
+            .map_err(layout_error)?;
+        self.git_bindings.insert(BlockId(id), task);
+        self.next_id = id.checked_add(1);
+        self.revision = revision;
+        Ok(id.into())
+    }
     pub(crate) fn check_content_room(&self, revision: WireU64) -> Result<(), CommandError> {
         self.validate(1, revision)?;
         if self.next_id.is_none() || self.workspace.blocks().count() >= MAX_BLOCKS {
@@ -374,6 +405,33 @@ impl WorkspaceHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_binding_reopen_is_idempotent_and_remove_only_drops_presentation() {
+        let mut host = WorkspaceHost::default();
+        let id = host.attach_git(7, 0.into()).unwrap();
+        assert_eq!(host.attach_git(7, 1.into()).unwrap(), id);
+        assert_eq!(host.revision, 1);
+        let value = serde_json::to_value(host.snapshot()).unwrap();
+        assert_eq!(value["blocks"][2]["git_task_id"], "7");
+        assert!(value["blocks"][2].get("session_id").is_none());
+        assert!(host.attach_git(8, 0.into()).is_err());
+        assert_eq!(serde_json::to_value(host.snapshot()).unwrap(), value);
+        let body = InvokeBody::Raw(
+            format!(
+                r#"{{"api_version":1,"expected_revision":"1","block_id":"{}"}}"#,
+                u64::from(id)
+            )
+            .into_bytes(),
+        );
+        assert!(matches!(host.remove(&body), MutationResult::Ok { .. }));
+        assert!(host.git_bindings.is_empty());
+        assert_ne!(host.attach_git(7, 2.into()).unwrap(), id);
+        assert_eq!(
+            host.git_bindings.values().copied().collect::<Vec<_>>(),
+            vec![7]
+        );
+    }
 
     #[test]
     fn text_storage_is_atomic_bounded_inert_and_removed_with_placement() {

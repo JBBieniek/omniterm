@@ -7,6 +7,7 @@ fn main() {
             "place_block",
             "terminal_command",
             "get_text_block",
+            "git_command",
         ]),
     ))
     .expect("failed to build the desktop host");

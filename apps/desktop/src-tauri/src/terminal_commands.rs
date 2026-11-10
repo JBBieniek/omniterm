@@ -156,6 +156,9 @@ pub fn dispatch(app: &tauri::AppHandle, body: &InvokeBody) -> Reply {
                 response.sessions = Some(runtime.list());
             }
             Operation::Quit => {
+                app.state::<crate::git_task::GitHost>()
+                    .shutdown()
+                    .map_err(runtime_error)?;
                 runtime.shutdown().map_err(runtime_error)?;
                 app.exit(0);
             }

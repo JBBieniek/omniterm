@@ -301,6 +301,7 @@ const OBSERVE: &str = r#"(async () => {
     new_terminal: control('new-terminal'), reopen: control('reopen-terminal'), terminate: control('terminate-session'),
     cancel_quit: control('cancel-quit'), confirm_quit: control('confirm-quit'),
     show_text: control('show-opened-text'),
+    show_git: control('show-opened-git'),
     pan: control('pan-tool'), zoom_in: control('zoom-in'), zoom_out: control('zoom-out'), reset: control('reset-view') },
   camera: matrix ? {zoom: matrix.a * 100, origin: {x: -matrix.e / matrix.a, y: -matrix.f / matrix.d}} : null,
   viewport: viewport ? {...bounds(viewport), scroll_x: viewport.scrollLeft, scroll_y: viewport.scrollTop} : null,
@@ -331,6 +332,20 @@ const OBSERVE: &str = r#"(async () => {
     error: element.querySelector('.terminal-error')?.textContent ?? ''
   })),
   quit_dialog: !!document.querySelector('dialog[open]'),
+  git_views: [...document.querySelectorAll('[data-git-task-id]')].slice(0,8).map(element => ({
+    task_id:element.dataset.gitTaskId, state:element.dataset.gitState, viewport:bounds(element),
+    counts:element.querySelector('[data-testid="git-counts"]')?.textContent ?? null,
+    interpretation:element.querySelector('.git-interpretation')?.textContent ?? null,
+    outcome:element.querySelector('[data-testid="git-outcome"]')?.textContent ?? null,
+    gap:element.querySelector('[data-testid="git-gap"]')?.textContent ?? null,
+    raw:element.querySelector('[data-testid="git-raw"]')?.textContent?.slice(0,8192) ?? null,
+    source:element.querySelector('.git-source')?.textContent ?? null,
+    refresh:bounds(element.querySelector('[data-testid="refresh-git"]')),
+    cancel:bounds(element.querySelector('[data-testid="cancel-git"]')),
+    toggle_raw:bounds(element.querySelector('[data-testid="raw-git"]')),
+    injected_elements:element.querySelectorAll('script,img,iframe,svg').length
+  })),
+  git_reopen: [...document.querySelectorAll('[data-reopen-git]')].slice(0,8).map(e => ({task_id:e.dataset.reopenGit,...bounds(e)})),
   text_views: [...document.querySelectorAll('[data-text-block-id]')].slice(0,8).map(element => ({
     id: element.dataset.textBlockId, source:element.querySelector('.text-source')?.textContent ?? '',
     content:element.querySelector('[data-testid="text-content"]')?.textContent?.slice(0,4096) ?? null,
@@ -375,7 +390,8 @@ fn inspect(app: &tauri::AppHandle) -> Result<Value, &'static str> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(
-        json!({ "layout": layout, "rendered": rendered, "sessions": sessions, "screens": screens, "window": {
+        json!({ "layout": layout, "rendered": rendered, "sessions": sessions, "screens": screens,
+          "git_tasks":app.state::<omniterm_desktop::git_task::GitHost>().list(), "window": {
             "title": window.title().map_err(|_| "window_unavailable")?,
             "width": size.width, "height": size.height,
             "scale_factor": window.scale_factor().map_err(|_| "window_unavailable")?,

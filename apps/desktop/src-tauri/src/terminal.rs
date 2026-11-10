@@ -1,7 +1,7 @@
 //! Runtime-owned local PTYs. UI unmounts never own process or reader lifetime.
 
 #[cfg(windows)]
-mod windows_job;
+pub(crate) mod windows_job;
 
 use crate::snapshot::WireU64;
 use portable_pty::{CommandBuilder, MasterPty, PtySize};
@@ -18,7 +18,7 @@ const RAW_LIMIT: usize = 256 * 1024;
 const MAX_SESSIONS: usize = 4;
 
 #[cfg(windows)]
-fn shell_directory(path: PathBuf) -> PathBuf {
+pub(crate) fn shell_directory(path: PathBuf) -> PathBuf {
     use std::path::{Component, Prefix};
     // PowerShell 5 cmdlets mis-handle canonical verbatim provider paths. Preserve
     // the resolved path/OsStr while removing only the Windows verbatim prefix.

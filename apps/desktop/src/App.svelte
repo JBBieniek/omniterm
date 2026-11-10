@@ -4,6 +4,9 @@
   import { listen } from '@tauri-apps/api/event';
   import TerminalView from './TerminalView.svelte';
   import TextView from './TextView.svelte';
+  import GitView from './GitView.svelte';
+  import { gitCommand } from './git';
+  import type { GitSummary } from './git';
   import { terminalCommand } from './terminal';
   import type { Session } from './terminal';
   import type { Layout as LayoutSnapshotV1 } from './workspace';
@@ -28,6 +31,7 @@
   let sessionId = $state('');
   let quitDialog: HTMLDialogElement;
   let openedId = $state<string | null>(null);
+  let gitRuns = $state<GitSummary[]>([]);
   let viewport: HTMLElement;
   let camera = $state<Camera>({origin: {x: 0, y: 0}, zoom: 100});
   let panTool = $state(false);
@@ -232,7 +236,8 @@
   async function openedText(id: string) {
     try {
       reconcile(await invoke<LayoutSnapshotV1>('get_layout_snapshot'));
-      if (snapshot?.blocks.some(block => block.id === id && block.text)) openedId = id;
+      if (snapshot?.blocks.some(block => block.id === id && (block.text || block.git_task_id))) openedId = id;
+      void refreshGit();
     } catch { error = 'A file was opened, but the board could not refresh; reload the workspace.'; needsReload = true; }
   }
   function showOpened() {
@@ -241,6 +246,24 @@
     cancelGestures();
     selectBlock(block.id);
     camera = {...camera, origin: {x: block.rect.x * snapshot.grid.cell_px, y: block.rect.y * snapshot.grid.cell_px}};
+  }
+
+  async function refreshGit() {
+    try { gitRuns = (await gitCommand<{tasks: GitSummary[]}>({op: 'list'})).tasks; }
+    catch { error = 'Could not inspect retained Git runs.'; }
+  }
+  async function gitAction(op: 'refresh' | 'reopen', taskId: string) {
+    if (!snapshot || pending || needsReload) return;
+    pending = true; error = '';
+    try {
+      const result = await gitCommand<{layout: LayoutSnapshotV1; block_id: string}>({op, task_id: taskId, expected_revision: snapshot.revision});
+      reconcile(result.layout); openedId = result.block_id; showOpened(); await refreshGit();
+    } catch (reason) {
+      needsReload = true;
+      error = `Could not confirm the Git action: ${String(reason)} Inspect retained runs and reload before another action; nothing was retried.`;
+      void refreshGit();
+    }
+    finally { pending = false; }
   }
 
   async function terminalAction(op: 'start' | 'reopen' | 'terminate' | 'quit') {
@@ -274,6 +297,7 @@
   onMount(() => {
     void loadWorkspace();
     void refreshSessions();
+    void refreshGit();
     const listeners = [listen('request-quit', () => { if (!quitDialog.open) quitDialog.showModal(); }),
       listen<string>('quit-failed', event => { error = event.payload; }),
       listen<string>('layout-changed', event => { void openedText(event.payload); })];
@@ -356,6 +380,7 @@
           <div class="block" class:selected={selectedId === block.id} data-block-id={block.id}
             class:terminal-block={!!block.session_id}
             class:text-block={!!block.text}
+            class:git-block={!!block.git_task_id}
             style:left={`${block.rect.x * snapshot.grid.cell_px}px`}
             style:top={`${block.rect.y * snapshot.grid.cell_px}px`}
             style:width={`${block.rect.width * snapshot.grid.cell_px}px`}
@@ -365,12 +390,13 @@
               onclick={() => { if (!panTool) selectBlock(block.id); }}>
               <span class="block-header" data-drag-block={block.id} title="Drag to move">
                 <span class="block-title" data-testid="block-title">{block.title}</span><span class="block-id">#{block.id}</span></span>
-              {#if !block.session_id && !block.text}<span class="block-content"><span class="placeholder-symbol" aria-hidden="true">▦</span>
+              {#if !block.session_id && !block.text && !block.git_task_id}<span class="block-content"><span class="placeholder-symbol" aria-hidden="true">▦</span>
                 <span>Placeholder</span><span class="block-dimensions">{block.rect.width} × {block.rect.height} cells</span></span>
               {/if}
             </button>
             {#if block.session_id}<TerminalView sessionId={block.session_id} onstate={refreshSessions} />{/if}
             {#if block.text}<TextView blockId={block.id} />{/if}
+            {#if block.git_task_id}<GitView taskId={block.git_task_id} onrefresh={id => gitAction('refresh', id)} />{/if}
             <button type="button" class="resize-handle" data-resize-block={block.id} aria-describedby="layout-instructions"
               aria-label={`Resize ${block.title} from bottom right`} title="Drag to resize; Shift+arrows with keyboard"
               onclick={() => { if (!panTool) selectBlock(block.id); }}>↘</button>
@@ -390,6 +416,13 @@
   </main>
 
   <footer class="statusbar">
+    {#if gitRuns.length}<div class="git-retained" aria-label="Retained Git runs">Git runs:
+      {#each gitRuns as run}<button type="button" data-reopen-git={run.task_id} disabled={unavailable}
+        onclick={() => gitAction('reopen', run.task_id)}>Show #{run.task_id}</button>{/each}
+    </div>{/if}
+    {#if snapshot?.blocks.some(block => block.id === openedId && block.git_task_id)}
+      <button type="button" data-testid="show-opened-git" onclick={showOpened}>Show Git run</button>
+    {/if}
     {#if snapshot?.blocks.some(block => block.id === openedId && block.text)}
       <button type="button" data-testid="show-opened-text" onclick={showOpened}>Show opened text</button>
     {/if}
@@ -412,8 +445,8 @@
 </div>
 
 <dialog bind:this={quitDialog} aria-labelledby="quit-title">
-  <h2 id="quit-title">Stop live Sessions and quit?</h2>
-  <p>Quitting stops the shells and their owned child processes.</p>
+  <h2 id="quit-title">Stop live Sessions and Tasks and quit?</h2>
+  <p>Quitting stops shells, Git runs and their owned child processes.</p>
   <button type="button" data-testid="cancel-quit" onclick={() => quitDialog.close()}>Keep working</button>
   <button type="button" data-testid="confirm-quit" disabled={pending}
     onclick={() => { quitDialog.close(); void terminalAction('quit'); }}>Stop Sessions and quit</button>

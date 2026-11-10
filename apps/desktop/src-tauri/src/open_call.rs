@@ -16,12 +16,14 @@ pub(crate) struct Request {
     api_version: u32,
     op: Operation,
     cwd: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     path: String,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Operation {
     Open,
+    GitStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -34,8 +36,16 @@ pub struct TextDocument {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub(crate) enum Reply {
-    Ok { block_id: WireU64 },
-    Error { error: String },
+    Ok {
+        block_id: WireU64,
+    },
+    Git {
+        block_id: WireU64,
+        task: Box<crate::git_task::TaskSnapshot>,
+    },
+    Error {
+        error: String,
+    },
 }
 
 fn decode(bytes: &[u8]) -> Result<Request, &'static str> {
@@ -48,6 +58,15 @@ fn decode(bytes: &[u8]) -> Result<Request, &'static str> {
     }
     if request.cwd.len() > 4096 || request.path.len() > 4096 {
         return Err("Open path exceeds 4096 UTF-8 bytes.");
+    }
+    match request.op {
+        Operation::Open if request.path.is_empty() => {
+            return Err("Open needs a relative file path.")
+        }
+        Operation::GitStatus if !request.path.is_empty() => {
+            return Err("Git status takes no path or arguments.")
+        }
+        _ => {}
     }
     Ok(request)
 }
@@ -83,19 +102,23 @@ fn text_bytes(bytes: &[u8]) -> Result<String, &'static str> {
 
 pub fn helper_main() -> Result<(), String> {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
-    if args.len() != 2 || args[0] != "open" {
-        return Err("Usage: omni open relative-file".into());
-    }
-    let path = args[1]
-        .to_str()
-        .ok_or("File names must be valid Unicode.")?;
-    relative_path(Path::new(path))?;
+    let (op, path) = if args.len() == 1 && args[0] == "git-status" {
+        (Operation::GitStatus, "")
+    } else if args.len() == 2 && args[0] == "open" {
+        let path = args[1]
+            .to_str()
+            .ok_or("File names must be valid Unicode.")?;
+        relative_path(Path::new(path))?;
+        (Operation::Open, path)
+    } else {
+        return Err("Usage: omni open relative-file | omni git-status".into());
+    };
     let cwd = std::env::current_dir()
         .and_then(|p| p.canonicalize())
         .map_err(|_| "Could not resolve helper cwd.")?;
     let request = Request {
         api_version: 1,
-        op: Operation::Open,
+        op,
         cwd: cwd.to_str().ok_or("Cwd must be valid Unicode.")?.into(),
         path: path.into(),
     };
@@ -107,6 +130,38 @@ pub fn helper_main() -> Result<(), String> {
                 Ok(())
             }
             Reply::Error { error } => Err(error),
+            Reply::Git { block_id, task } => {
+                use std::io::Write;
+                for frame in &task.frames {
+                    if frame.stream == "stdout" {
+                        std::io::stdout().write_all(&frame.bytes)
+                    } else {
+                        std::io::stderr().write_all(&frame.bytes)
+                    }
+                    .map_err(|_| "Could not forward Git output.")?;
+                }
+                println!(
+                    "Git Task #{}: {} (exit {:?}); block #{}",
+                    u64::from(task.task_id),
+                    task.state,
+                    task.exit_code,
+                    u64::from(block_id)
+                );
+                if task.dropped_bytes > 0 {
+                    eprintln!(
+                        "RAW GAP: {} bytes omitted by capture limits.",
+                        task.dropped_bytes
+                    );
+                }
+                println!("{}", task.interpretation);
+                if task.state == "succeeded" {
+                    Ok(())
+                } else {
+                    Err(task.error.unwrap_or_else(|| {
+                        "Git failed; inspect raw output and exit outcome.".into()
+                    }))
+                }
+            }
         }
     }
     #[cfg(not(windows))]

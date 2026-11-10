@@ -6,7 +6,7 @@ use windows::Win32::System::JobObjects::{
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 
-pub(super) struct ProcessJob(OwnedHandle);
+pub(crate) struct ProcessJob(OwnedHandle);
 
 impl ProcessJob {
     pub fn contains(&self, pid: u32) -> bool {
