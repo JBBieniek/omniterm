@@ -8,7 +8,7 @@
   import { gitCommand } from './git';
   import type { GitSummary } from './git';
   import { terminalCommand } from './terminal';
-  import type { Session } from './terminal';
+  import type { Session, TerminalUpdate } from './terminal';
   import type { Layout as LayoutSnapshotV1 } from './workspace';
   import { panScreen, screenToWorld, stepZoom, viewportPoint, zoomAt, zoomShortcut } from './camera';
   import type { Camera, Point } from './camera';
@@ -180,6 +180,7 @@
     try {
       reconcile(await invoke<LayoutSnapshotV1>('get_layout_snapshot'));
       needsReload = false;
+      void refreshSessions(true);
     } catch {
       needsReload = true;
       error = 'Could not load the workspace. Please retry or restart Omniterm.';
@@ -225,9 +226,9 @@
     }
   }
 
-  async function refreshSessions() {
+  async function refreshSessions(observe = false) {
     try {
-      const result = await terminalCommand({op: 'list'});
+      const result = await terminalCommand({op: observe ? 'observe' : 'list'});
       if (result.status === 'ok' && result.sessions) {
         sessions = result.sessions;
         if (!sessions.some(s => s.session_id === sessionId)) sessionId = sessions[0]?.session_id ?? '';
@@ -303,7 +304,15 @@
     void refreshGit();
     const listeners = [listen('request-quit', () => { if (!quitDialog.open) quitDialog.showModal(); }),
       listen<string>('quit-failed', event => { error = event.payload; }),
-      listen<string>('layout-changed', event => { void openedText(event.payload); })];
+      listen<string>('layout-changed', event => { void openedText(event.payload); }),
+      listen<TerminalUpdate>('terminal-updated', event => {
+        const hint = event.payload;
+        void terminalCommand({op:'acknowledge',session_id:hint.session_id,revision:hint.revision}).then(reply => {
+          if (reply.status === 'error') error = reply.error.message;
+        }).catch(() => { error = 'Terminal updates disconnected; reload the workspace.'; needsReload = true; });
+        const known = sessions.find(s => s.session_id === hint.session_id);
+        if (known && (known.state !== hint.state || known.exit_code !== hint.exit_code)) void refreshSessions();
+      }).then(stop => { void refreshSessions(true); return stop; })];
     void Promise.all(listeners).catch(() => { error = 'Could not subscribe to app quit confirmation; restart Omniterm.'; needsReload = true; });
     return () => { for (const listener of listeners) void listener.then(unlisten => unlisten(), () => {}); };
   });

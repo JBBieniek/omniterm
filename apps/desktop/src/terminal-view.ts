@@ -1,5 +1,24 @@
 export const TERMINAL_LINE_HEIGHT = 22;
 
+// One screen/status read at a time; keep one pending refresh across awaits.
+export function terminalRefresh(read: () => Promise<void>, failed: (error: unknown) => void) {
+  let stopped = false, busy = false, queued = false, pending = false;
+  async function run() {
+    queued = false;
+    if (stopped || busy || !pending) return;
+    pending = false;
+    busy = true;
+    try { await read(); } catch (error) { failed(error); }
+    finally { busy = false; if (pending) request(); }
+  }
+  function request() {
+    if (stopped) return;
+    pending = true;
+    if (!busy && !queued) { queued = true; queueMicrotask(() => { void run(); }); }
+  }
+  return {request, dispose() { stopped = true; pending = false; }};
+}
+
 export function fitTerminal(width: number, height: number, cellWidth: number) {
   if (![width,height,cellWidth].every(Number.isFinite) || width < 0 || height < 0 || cellWidth <= 0) {
     throw new RangeError('Invalid terminal dimensions');

@@ -18,6 +18,7 @@ const evidence = {
 const check = (name, detail = {}) => evidence.checks.push({ name, result: 'PASS', ...detail });
 let app;
 const cameraCommands = [
+  'focus_probe',
   {pointer:{phase:'move',button:'left',x:10,y:10}},
   {resize:{width:640,height:480}}, {key:{key:'zoom_in'}},
   'shortcut_guards', {cancel_pan:{lost_capture:true}},
@@ -47,7 +48,7 @@ try {
     assert.equal(result.stdout, '');
     assert.equal(result.stderr, '');
     const bytes = await readFile(binary);
-    for (const marker of ['private-stdio', '__omniterm_test_events', 'point_outside_webview']) {
+    for (const marker of ['private-stdio', '__omniterm_test_events', '__omniterm_ipc_counts', 'Emulation.setFocusEmulationEnabled', 'point_outside_webview']) {
       assert.equal(bytes.includes(Buffer.from(marker)), false, `Production contains ${marker}`);
       assert.equal(bytes.includes(Buffer.from(marker, 'utf16le')), false, `Production contains wide ${marker}`);
     }

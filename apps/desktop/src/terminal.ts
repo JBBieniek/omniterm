@@ -8,6 +8,7 @@ export type Screen = { session_id: string; revision: string; rows: number; cols:
   state: string; exit_code: number | null; raw_bytes: number; evicted_bytes: number;
   output_eof: boolean; read_failed: boolean; reply_dropped: boolean };
 export type Session = {session_id: string; parent_session_id: string | null; state: string; exit_code: number | null};
+export type TerminalUpdate = Pick<Session, 'session_id' | 'state' | 'exit_code'> & {revision: string};
 export type TerminalReply = {status: 'ok'; screen?: Screen; sessions?: Session[];
   layout?: import('./workspace').Layout; block_id?: string; session_id?: string}
   | {status: 'error'; error: {code: string; message: string}};

@@ -28,6 +28,14 @@ export const CASES = [
   ['B-CHILD-01','child','Three fixed-shell helper launch workflows to observed linked terminal: two, three, four retained Sessions; controller input/IPC/inspection included'],
   ['B-CHILD-02','child','10 Enter requests to observed output in the separate child Session'],
   ['B-CHILD-03','child','15s owned tree window starting with two Sessions, input/resize/helper/view recovery and idle; not idle-only or a scaling rate'],
+  ['B-IDLE-05','idle','Empty same-factory app, >=60s owned-process counters; no controller inspection during sampling'],
+  ['B-IDLE-06','idle','One visible unfocused quiet Session, >=60s counters and stable source/view signatures'],
+  ['B-IDLE-07','idle','Same live Session with its Block removed, >=60s owned-process counters'],
+  ['B-IDLE-08','idle','Same Session with frozen selected reading page, >=60s owned-process counters'],
+  ['B-IDLE-09','idle','Same quiet Session focused with cursor animation, >=60s owned-process counters'],
+  ['B-UPDATES-01','idle','Test-host-only screen/list/other invoke deltas and rates for all five >=60s idle controls; no request contents retained'],
+  ['B-COLD-01','idle','Two independent epoch-ms observations after >=60s quiet: external visible output and frozen-page exit; includes file/output/render/inspection'],
+  ['B-INPUT-02','idle','10 Enter-to-rendered-output samples after the long-idle visible wake'],
 ].map(([id,group,workload]) => ({id,revision:1,group,workload}));
 
 function nonnegative(value) {assert(typeof value==='number'&&Number.isFinite(value)&&value>=0,'Expected a finite nonnegative number');return value;}
@@ -174,6 +182,25 @@ export async function collectCases(group,mode,read) {
     add('B-CHILD-01','child/result.json',timingMetrics(result.measurements.child_launch_ms,3));
     add('B-CHILD-02','child/result.json',timingMetrics(result.measurements.child_input_ms,10));
     add('B-CHILD-03','child/resources.json',resourceMetrics(await read('child/resources.json'),15));
+  }
+  if (group==='idle'||group==='all') {
+    const result=await read('idle/result.json');assert.equal(result.result,'PASS');
+    assert.equal(result.checks.length,6);assert(result.checks.every(c=>c.result==='PASS'));
+    assert.deepEqual(result.idle_observations?.map(o=>o.name),['empty','visible','focused','hidden','reading']);
+    for (const [id,name] of [['B-IDLE-05','empty'],['B-IDLE-06','visible'],['B-IDLE-07','hidden'],['B-IDLE-08','reading'],['B-IDLE-09','focused']]) {
+      add(id,'idle/'+name+'.json',resourceMetrics(await read('idle/'+name+'.json'),60));
+    }
+    const requests={};
+    for (const o of result.idle_observations) {
+      assert.deepEqual(o.after,o.before,'Disturbed idle control');assert(nonnegative(o.elapsed_seconds)>=60);
+      assert.deepEqual(Object.keys(o.requests).sort(),['list','other','screen']);
+      for (const n of Object.values(o.requests)) assert(Number.isSafeInteger(n)&&nonnegative(n)>=0);
+      requests[o.name]={...o.requests,reads_per_second:(o.requests.screen+o.requests.list)/o.elapsed_seconds};
+    }
+    add('B-UPDATES-01','idle/result.json',requests);
+    assert.equal(result.measurements.cold_output_ms?.length,2);
+    add('B-COLD-01','idle/result.json',{visible_output_ms:nonnegative(result.measurements.cold_output_ms[0]),frozen_exit_ms:nonnegative(result.measurements.cold_output_ms[1])});
+    add('B-INPUT-02','idle/result.json',timingMetrics(result.measurements.input_ms,10));
   }
   return cases;
 }

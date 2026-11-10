@@ -31,7 +31,12 @@ enum Operation {
         session_id: WireU64,
         expected_revision: WireU64,
     },
-    List,
+    List {},
+    Observe {},
+    Acknowledge {
+        session_id: WireU64,
+        revision: WireU64,
+    },
     Screen {
         session_id: WireU64,
         after: Option<WireU64>,
@@ -58,7 +63,7 @@ enum Operation {
     Terminate {
         session_id: WireU64,
     },
-    Quit,
+    Quit {},
 }
 #[derive(Default, Serialize)]
 pub struct Success {
@@ -132,7 +137,14 @@ pub fn dispatch(app: &tauri::AppHandle, body: &InvokeBody) -> Reply {
                 response.layout = Some(workspace.snapshot());
                 response.sessions = Some(runtime.list());
             }
-            Operation::List => response.sessions = Some(runtime.list()),
+            Operation::List {} => response.sessions = Some(runtime.list()),
+            Operation::Observe {} => response.sessions = Some(runtime.observe()),
+            Operation::Acknowledge {
+                session_id,
+                revision,
+            } => runtime
+                .acknowledge(session_id.into(), revision)
+                .map_err(runtime_error)?,
             Operation::Screen {
                 session_id,
                 after,
@@ -171,7 +183,7 @@ pub fn dispatch(app: &tauri::AppHandle, body: &InvokeBody) -> Reply {
                     .map_err(runtime_error)?;
                 response.sessions = Some(runtime.list());
             }
-            Operation::Quit => {
+            Operation::Quit {} => {
                 app.state::<crate::git_task::GitHost>()
                     .shutdown()
                     .map_err(runtime_error)?;
@@ -203,10 +215,15 @@ mod tests {
             r#"{"op":"resize","session_id":"1","rows":-1,"cols":80}"#,
             r#"{"op":"resize","session_id":"1","rows":24.5,"cols":80}"#,
             r#"{"op":"execute","script":"bad"}"#,
+            r#"{"op":"acknowledge","session_id":"1","revision":1}"#,
+            r#"{"op":"acknowledge","session_id":"1","revision":"01"}"#,
+            r#"{"op":"observe","program":"anything"}"#,
+            r#"{"op":"list","program":"anything"}"#,
+            r#"{"op":"quit","session_id":"1"}"#,
         ] {
             let body =
                 InvokeBody::Raw(format!(r#"{{"api_version":1,"command":{command}}}"#).into_bytes());
-            assert!(decode::<Request>(&body).is_err());
+            assert!(decode::<Request>(&body).is_err(), "{command}");
         }
         assert!(decode::<Request>(&InvokeBody::Raw(vec![b' '; 65537])).is_err());
         assert!(decode::<Request>(&InvokeBody::Raw(

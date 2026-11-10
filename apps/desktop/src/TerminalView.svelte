@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
+  import { listen } from '@tauri-apps/api/event';
   import { zoomShortcut } from './camera';
   import { fitTerminal, terminalCommand } from './terminal';
-  import type { Screen } from './terminal';
-  import {historyKey, historyOffset, screenText, TERMINAL_LINE_HEIGHT} from './terminal-view';
+  import type { Screen, TerminalUpdate } from './terminal';
+  import {historyKey, historyOffset, screenText, terminalRefresh, TERMINAL_LINE_HEIGHT} from './terminal-view';
 
   let { sessionId, parentSessionId, onparent, onstate }: {
     sessionId: string; parentSessionId: string | null; onparent: (id: string) => void; onstate: () => void
@@ -107,12 +108,13 @@
   }
 
   onMount(() => {
-    let timer: ReturnType<typeof setTimeout>;
     let fitTimer: ReturnType<typeof setTimeout>;
     let lastSize = '';
     let lastState = '';
     let fitting = false;
-    let polling = false;
+    let forceRead = true;
+    let notice: TerminalUpdate | null = null;
+    let unlisten: (() => void) | undefined;
     async function fit() {
       if (disposed || fitting || !surface.clientWidth || !surface.clientHeight || sessionState !== 'running') return;
       cellWidth = measure.offsetWidth / 10;
@@ -127,49 +129,53 @@
       } catch { error = 'Terminal resize could not be confirmed.'; }
       finally { fitting = false; }
     }
-    async function poll() {
-      if (disposed || polling) return;
-      polling = true;
-      const requested = query;
-      let failed = false;
-      try {
-        const metadataOnly = reading && applied === requested;
-        const reply = await terminalCommand(metadataOnly ? {op:'list'} : {op:'screen',session_id:sessionId,scrollback:reading ? offset : 0,
-          after:reading || applied !== requested ? null : screen?.revision ?? null});
-        if (disposed || query !== requested) return;
-        if (reply.status === 'error') { failed = true; error = reply.error.message; return; }
-        applied = requested;
-        if (reply.screen) {
-          screen = reply.screen;
-          offset = screen.scrollback_offset;
-          sessionState = screen.state;
-          exitCode = screen.exit_code;
-          void fit();
-        }
-        if (metadataOnly) {
-          const session = reply.sessions?.find(s => s.session_id === sessionId);
-          if (session) { sessionState = session.state; exitCode = session.exit_code; }
-        }
-        if (lastState !== sessionState) { lastState = sessionState; onstate(); }
-        if (focusNext) {
-          focusNext = false;
-          await tick();
-          if (query === requested) (reading ? readingSurface : input)?.focus({preventScroll:true});
-        }
-      } catch { failed = true; if (!disposed && query === requested) error = 'Terminal view disconnected; reload the workspace to reconnect.'; }
-      finally {
-        polling = false;
-        if (!disposed && query !== requested) timer = setTimeout(poll,0);
-        else if (!disposed && !failed && reading && !['exited','failed'].includes(sessionState)) timer = setTimeout(poll,500);
-        else if (!disposed && !failed && !reading && !(screen?.output_eof && ['exited','failed'].includes(screen.state))) timer = setTimeout(poll,125);
+    const updates = terminalRefresh(async () => {
+      if (disposed) return;
+      const metadataOnly = reading && applied === query;
+      if (!forceRead) {
+        if (metadataOnly && notice?.state === sessionState && notice.exit_code === exitCode) return;
+        if (!metadataOnly && screen && notice && BigInt(notice.revision) <= BigInt(screen.revision)) return;
       }
-    }
-    refresh = () => { clearTimeout(timer); void poll(); };
+      const requested = query;
+      const full = forceRead;
+      forceRead = false;
+      const reply = await terminalCommand(metadataOnly ? {op:'list'} : {op:'screen',session_id:sessionId,scrollback:reading ? offset : 0,
+        after:full || reading || applied !== requested ? null : screen?.revision ?? null});
+      if (disposed || query !== requested) return;
+      if (reply.status === 'error') { error = reply.error.message; return; }
+      applied = requested;
+      if (reply.screen) {
+        screen = reply.screen;
+        offset = screen.scrollback_offset;
+        sessionState = screen.state;
+        exitCode = screen.exit_code;
+        void fit();
+      }
+      if (metadataOnly) {
+        const session = reply.sessions?.find(s => s.session_id === sessionId);
+        if (session) { sessionState = session.state; exitCode = session.exit_code; }
+      }
+      if (lastState !== sessionState) { lastState = sessionState; onstate(); }
+      if (focusNext) {
+        focusNext = false;
+        await tick();
+        if (query === requested) (reading ? readingSurface : input)?.focus({preventScroll:true});
+      }
+    }, () => { if (!disposed) error = 'Terminal view disconnected; reload the workspace to reconnect.'; });
+    refresh = () => { forceRead = true; updates.request(); };
     const observer = new ResizeObserver(() => { clearTimeout(fitTimer); fitTimer = setTimeout(fit, 100); });
     observer.observe(surface);
     surface.addEventListener('wheel',wheel,{passive:false});
-    void poll();
-    return () => { disposed = true; refresh = () => {}; clearTimeout(timer); clearTimeout(fitTimer); observer.disconnect(); surface.removeEventListener('wheel',wheel); };
+    // Subscribe first, then read: a change around the initial snapshot is retained.
+    void listen<TerminalUpdate>('terminal-updated', event => {
+      const next = event.payload;
+      if (disposed || next.session_id !== sessionId || !/^(0|[1-9][0-9]{0,19})$/.test(next.revision)) return;
+      if (notice && BigInt(next.revision) <= BigInt(notice.revision)) return;
+      notice = next;
+      updates.request();
+    }).then(stop => { if (disposed) stop(); else { unlisten = stop; refresh(); } })
+      .catch(() => { if (!disposed) error = 'Could not subscribe to terminal updates; reload the workspace.'; });
+    return () => { disposed = true; refresh = () => {}; updates.dispose(); unlisten?.(); clearTimeout(fitTimer); observer.disconnect(); surface.removeEventListener('wheel',wheel); };
   });
 </script>
 

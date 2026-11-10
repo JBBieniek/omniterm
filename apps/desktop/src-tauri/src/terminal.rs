@@ -150,6 +150,8 @@ struct RawFrame {
     bytes: Vec<u8>,
 }
 struct TerminalState {
+    updates: Option<mpsc::SyncSender<()>>,
+    pending_update: Option<u64>,
     parser: vt100::Parser<Replies>,
     frames: VecDeque<RawFrame>,
     raw_bytes: usize,
@@ -209,6 +211,14 @@ pub struct SessionSummary {
     exit_code: Option<u32>,
 }
 
+#[derive(Serialize, Clone)]
+pub struct TerminalUpdate {
+    session_id: WireU64,
+    revision: WireU64,
+    state: &'static str,
+    exit_code: Option<u32>,
+}
+
 fn color(color: vt100::Color, background: bool) -> String {
     const BASIC: [&str; 16] = [
         "#0c0c0c", "#cd3131", "#0dbc79", "#e5e510", "#2472c8", "#bc3fbc", "#11a8cd", "#e5e5e5",
@@ -238,6 +248,8 @@ fn color(color: vt100::Color, background: bool) -> String {
 impl TerminalState {
     fn new(rows: u16, cols: u16) -> Self {
         Self {
+            updates: None,
+            pending_update: None,
             parser: vt100::Parser::new_with_callbacks(
                 NonZeroU16::new(rows).unwrap(),
                 NonZeroU16::new(cols).unwrap(),
@@ -258,6 +270,35 @@ impl TerminalState {
             reply_dropped: false,
         }
     }
+    fn changed(&mut self) {
+        self.revision = self.revision.saturating_add(1);
+        self.signal();
+    }
+    fn signal(&self) {
+        if self.pending_update.is_some() {
+            return;
+        }
+        if let Some(updates) = &self.updates {
+            // One pending hint; authoritative data remains in this state.
+            let _ = updates.try_send(());
+        }
+    }
+    fn acknowledge(&mut self, revision: u64) {
+        if self.pending_update == Some(revision) {
+            self.pending_update = None;
+            if self.revision > revision {
+                self.signal();
+            }
+        }
+    }
+    fn update(&self, id: u64) -> TerminalUpdate {
+        TerminalUpdate {
+            session_id: id.into(),
+            revision: self.revision.into(),
+            state: self.status(),
+            exit_code: self.exit_code,
+        }
+    }
     fn process(&mut self, bytes: &[u8]) {
         self.parser.process(bytes);
         self.frames.push_back(RawFrame {
@@ -271,13 +312,13 @@ impl TerminalState {
             bytes: bytes.to_vec(),
         });
         self.sequence = self.sequence.saturating_add(1);
-        self.revision = self.revision.saturating_add(1);
         self.raw_bytes += bytes.len();
         while self.raw_bytes > RAW_LIMIT {
             let frame = self.frames.pop_front().unwrap();
             self.raw_bytes -= frame.bytes.len();
             self.evicted_bytes = self.evicted_bytes.saturating_add(frame.bytes.len() as u64);
         }
+        self.changed();
     }
     fn status(&self) -> &'static str {
         if self.wait_failed {
@@ -441,6 +482,25 @@ impl TerminalHost {
             })
             .collect()
     }
+    pub fn observe(&self) -> Vec<SessionSummary> {
+        {
+            let sessions = self.sessions.lock().unwrap();
+            for session in sessions.entries.values() {
+                let mut state = session.state.lock().unwrap();
+                state.pending_update = None;
+                state.signal();
+            }
+        }
+        self.list()
+    }
+    pub fn acknowledge(&self, id: u64, revision: WireU64) -> Result<(), &'static str> {
+        self.get(id)?
+            .state
+            .lock()
+            .unwrap()
+            .acknowledge(revision.into());
+        Ok(())
+    }
     pub fn screen(
         &self,
         id: u64,
@@ -544,7 +604,7 @@ impl TerminalHost {
             NonZeroU16::new(rows).unwrap(),
             NonZeroU16::new(cols).unwrap(),
         );
-        state.revision = state.revision.saturating_add(1);
+        state.changed();
         Ok(())
     }
     pub fn terminate(&self, id: u64) -> Result<(), &'static str> {
@@ -559,7 +619,7 @@ impl TerminalHost {
                 return Ok(());
             }
             state.stopping = true;
-            state.revision = state.revision.saturating_add(1);
+            state.changed();
         }
         #[cfg(windows)]
         {
@@ -768,7 +828,12 @@ impl TerminalHost {
             }
         };
         drop(pair.slave);
-        let state = Arc::new(Mutex::new(TerminalState::new(24, 80)));
+        let (update_tx, update_rx) = mpsc::sync_channel(1);
+        let mut initial = TerminalState::new(24, 80);
+        if opening.is_some() {
+            initial.updates = Some(update_tx);
+        }
+        let state = Arc::new(Mutex::new(initial));
         let (input_tx, input_rx) = mpsc::sync_channel::<Vec<u8>>(16);
         let control = Arc::new(Mutex::new(Control {
             master: Some(pair.master),
@@ -785,7 +850,7 @@ impl TerminalHost {
                 {
                     let mut state = writer_state.lock().unwrap();
                     state.read_failed = true;
-                    state.revision = state.revision.saturating_add(1);
+                    state.changed();
                     break;
                 }
             }
@@ -804,7 +869,9 @@ impl TerminalHost {
                     }
                     Err(e) => {
                         if e.kind() != std::io::ErrorKind::BrokenPipe {
-                            reader_state.lock().unwrap().read_failed = true;
+                            let mut state = reader_state.lock().unwrap();
+                            state.read_failed = true;
+                            state.changed();
                         }
                         break;
                     }
@@ -820,12 +887,14 @@ impl TerminalHost {
                     std::mem::take(&mut state.parser.callbacks_mut().bytes)
                 };
                 if !replies.is_empty() && input_tx.try_send(replies).is_err() {
-                    parser_state.lock().unwrap().reply_dropped = true;
+                    let mut state = parser_state.lock().unwrap();
+                    state.reply_dropped = true;
+                    state.changed();
                 }
             }
             let mut state = parser_state.lock().unwrap();
             state.output_eof = true;
-            state.revision = state.revision.saturating_add(1);
+            state.changed();
         });
         let waiter_state = state.clone();
         let waiter_control = control.clone();
@@ -842,7 +911,7 @@ impl TerminalHost {
                     Ok(status) => state.exit_code = Some(status.exit_code()),
                     Err(_) => state.wait_failed = true,
                 };
-                state.revision = state.revision.saturating_add(1);
+                state.changed();
             }
             let (job, master) = {
                 let mut control = waiter_control.lock().unwrap();
@@ -858,21 +927,126 @@ impl TerminalHost {
             id,
             Arc::new(Session {
                 parent_session_id,
-                state,
+                state: state.clone(),
                 control,
                 open_access,
             }),
         );
         if let Some((server, app, _)) = opening {
+            notify_updates(app.clone(), id, state, update_rx);
             server.start(app, id);
         }
         Ok(id)
     }
 }
 
+#[cfg(windows)]
+fn notify_updates(
+    app: tauri::AppHandle,
+    id: u64,
+    state: Arc<Mutex<TerminalState>>,
+    updates: mpsc::Receiver<()>,
+) {
+    use tauri::{Emitter, Manager};
+    std::thread::spawn(move || {
+        let mut last_revision = None;
+        let mut retry = false;
+        while retry || updates.recv().is_ok() {
+            let next = {
+                let mut state = state.lock().unwrap();
+                let notice = state.update(id);
+                if state.pending_update.is_some() || last_revision == Some(notice.revision) {
+                    None
+                } else {
+                    state.pending_update = Some(state.revision);
+                    Some((
+                        notice,
+                        state.output_eof && (state.exit_code.is_some() || state.wait_failed),
+                    ))
+                }
+            };
+            let Some((notice, finished)) = next else {
+                continue;
+            };
+            retry = app.emit("terminal-updated", &notice).is_err();
+            if !retry {
+                last_revision = Some(notice.revision);
+                if finished {
+                    break;
+                }
+            } else {
+                state.lock().unwrap().pending_update = None;
+                if app.get_webview_window("main").is_none() {
+                    break;
+                }
+            }
+            // First change after idle is immediate; busy output is capped at 8Hz.
+            // This is not an idle timer: after the cooldown, recv blocks.
+            std::thread::sleep(Duration::from_millis(125));
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changes_coalesce_without_signalling_view_reads_or_dropping_the_final_change() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let mut state = TerminalState::new(3, 20);
+        state.updates = Some(tx);
+        for _ in 0..100 {
+            state.process(b"output\r\n");
+        }
+        assert_eq!(rx.try_recv(), Ok(()));
+        assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Empty));
+        let revision = state.revision;
+        state.snapshot(1);
+        state.snapshot_at(1, 2);
+        assert_eq!(state.revision, revision);
+        assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Empty));
+        state.process(b"final");
+        assert_eq!(rx.try_recv(), Ok(()));
+        assert_eq!(state.revision, revision + 1);
+    }
+
+    #[test]
+    fn pending_notice_bounds_delivery_and_only_its_acknowledgement_releases_latest_state() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let mut state = TerminalState::new(3, 20);
+        state.updates = Some(tx);
+        state.process(b"first");
+        assert_eq!(rx.try_recv(), Ok(()));
+        let sent = state.revision;
+        state.pending_update = Some(sent);
+        for _ in 0..100 {
+            state.process(b"next");
+        }
+        assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Empty));
+        state.acknowledge(sent + 1);
+        assert_eq!(state.pending_update, Some(sent));
+        assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Empty));
+        state.acknowledge(sent);
+        assert_eq!(state.pending_update, None);
+        assert_eq!(rx.try_recv(), Ok(()));
+        state.acknowledge(sent);
+        assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Empty));
+        assert_eq!(state.revision, sent + 100);
+    }
+
+    #[test]
+    fn update_metadata_contains_no_terminal_bytes_or_controls() {
+        let mut state = TerminalState::new(3, 40);
+        state.process(b"sample-secret <img src=x>");
+        let notice = serde_json::to_value(state.update(9007199254740993)).unwrap();
+        assert_eq!(notice.as_object().unwrap().len(), 4);
+        assert_eq!(notice["session_id"], "9007199254740993");
+        assert_eq!(notice["revision"], "1");
+        assert_eq!(notice["state"], "running");
+        assert!(notice["exit_code"].is_null());
+        assert!(!notice.to_string().contains("sample-secret"));
+    }
 
     #[test]
     fn history_snapshots_are_view_local_and_preserve_live_processing() {

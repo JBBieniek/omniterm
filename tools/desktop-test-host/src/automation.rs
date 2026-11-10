@@ -19,6 +19,7 @@ const MAX_RESPONSE: usize = 8 * 1024 * 1024;
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
     Inspect,
+    FocusProbe,
     Screenshot,
     BeginFrames {},
     EndFrames {},
@@ -229,6 +230,17 @@ fn serve(
         };
         match command {
             Command::Inspect => reply(output, inspect(app))?,
+            Command::FocusProbe => reply(
+                output,
+                window(app).and_then(|w| {
+                    protocol(
+                        &w,
+                        "Emulation.setFocusEmulationEnabled",
+                        json!({"enabled":true}),
+                    )?;
+                    Ok(json!({"document_focus_control":true}))
+                }),
+            )?,
             Command::Screenshot => reply(output, screenshot(app))?,
             Command::BeginFrames {} => reply(output, frames(app, true))?,
             Command::EndFrames {} => reply(output, frames(app, false))?,
@@ -294,6 +306,28 @@ const OBSERVE: &str = r#"(async () => {
     return element ? {...bounds(element), disabled: element.disabled} : null;
   };
   // Test-host-only counters prove engine input delivery without recording text.
+  if (!globalThis.__omniterm_ipc_counts) {
+    const counts = {screen:0,list:0,other:0};
+    const fetch = window.fetch;
+    const endpoint = window.__TAURI_INTERNALS__.convertFileSrc('terminal_command','ipc');
+    const observed = function(url,options) {
+      if (url === endpoint) {
+        let op = 'other';
+        try {
+          const body = options?.body;
+          if (body?.byteLength <= 65536 || typeof body === 'string' && body.length <= 65536) {
+            const decoded = JSON.parse(typeof body === 'string' ? body : new TextDecoder().decode(body));
+            if (['screen','list'].includes(decoded.command?.op)) op = decoded.command.op;
+          }
+        } catch { /* Counts only; original transport retains validation. */ }
+        counts[op] = Math.min(counts[op]+1,1000000000);
+      }
+      return fetch.call(this,url,options);
+    };
+    window.fetch = observed;
+    if (window.fetch !== observed) throw Error('Request counter unavailable');
+    globalThis.__omniterm_ipc_counts = counts;
+  }
   if (!globalThis.__omniterm_test_events) {
     const events = { clicks: 0, key_downs: 0, click_trusted: false, key_trusted: false };
     globalThis.__omniterm_test_events = events;
@@ -387,7 +421,9 @@ const OBSERVE: &str = r#"(async () => {
   grid: document.querySelector('[data-testid="grid-dimensions"]')?.textContent?.trim().slice(0, 256) ?? null,
   cell: document.querySelector('[data-testid="cell-size"]')?.textContent?.trim().slice(0, 256) ?? null,
   focused: document.hasFocus(),
+  visibility: document.visibilityState,
   input_events: {...globalThis.__omniterm_test_events},
+  terminal_requests: {...globalThis.__omniterm_ipc_counts},
   test_command_rejected: await window.__TAURI_INTERNALS__.invoke('automation_inspect').then(() => false, () => true)
 }; })()"#;
 

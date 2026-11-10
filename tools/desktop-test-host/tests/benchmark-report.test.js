@@ -76,6 +76,16 @@ const report = value => ({schema:1,suite_revision:1,status:'COLLECTED',mode:'ful
   source:{commit:'abc',dirty:false},binaries:{host:'abc'},
   cases:[{id:'B-INPUT-01',revision:1,metrics:{latency_ms:{n:20,p50:value,p95:value+1,max:value+2}}}]});
 
+test('idle controls require five stable full windows, request deltas and complete cold/input observations', async () => {
+  const names=['empty','visible','focused','hidden','reading'];
+  const result={result:'PASS',checks:Array(6).fill({result:'PASS'}),idle_observations:names.map(name=>({name,before:{revision:'1'},after:{revision:'1'},requests:{screen:0,list:0,other:0},elapsed_seconds:60})),
+    measurements:{cold_output_ms:[50,60],input_ms:Array(10).fill(40)}};
+  const read=async path=>path==='idle/result.json'?result:counters();
+  assert.deepEqual((await collectCases('idle','full',read)).map(c=>c.id),['B-IDLE-05','B-IDLE-06','B-IDLE-07','B-IDLE-08','B-IDLE-09','B-UPDATES-01','B-COLD-01','B-INPUT-02']);
+  result.idle_observations[1].after.revision='2';await assert.rejects(collectCases('idle','full',read));
+  result.idle_observations[1].after.revision='1';result.measurements.input_ms.pop();await assert.rejects(collectCases('idle','full',read));
+});
+
 test('compatible baselines allow implementation changes but report observations, never significance', () => {
   const before=report(100),after=report(80);after.source.commit='def';after.binaries.host='def';
   const result=compareReports(after,before);
