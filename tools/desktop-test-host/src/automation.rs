@@ -20,6 +20,8 @@ const MAX_RESPONSE: usize = 8 * 1024 * 1024;
 enum Command {
     Inspect,
     Screenshot,
+    BeginFrames {},
+    EndFrames {},
     Click {
         x: u32,
         y: u32,
@@ -217,6 +219,8 @@ fn serve(
         match command {
             Command::Inspect => reply(output, inspect(app))?,
             Command::Screenshot => reply(output, screenshot(app))?,
+            Command::BeginFrames {} => reply(output, frames(app, true))?,
+            Command::EndFrames {} => reply(output, frames(app, false))?,
             Command::Click { x, y } => reply(output, click(app, x, y))?,
             Command::Pointer {
                 phase,
@@ -555,6 +559,42 @@ fn validate_size(width: u32, height: u32) -> Result<(), &'static str> {
 
 // Fixed synthetic integration probes, distinct from native engine input. They
 // test DOM guards/cancellation, not physical IME, OS dialogs or device capture.
+fn frames(app: &tauri::AppHandle, begin: bool) -> Result<Value, &'static str> {
+    let expression = if begin {
+        r#"(() => {
+          const old = globalThis.__omniterm_frames;
+          if (old) { old.active = false; cancelAnimationFrame(old.handle); }
+          const probe = {active:true, began:performance.now(), last:null, intervals:[], handle:0};
+          globalThis.__omniterm_frames = probe;
+          const frame = now => {
+            if (!probe.active) return;
+            if (probe.last !== null) probe.intervals.push(now - probe.last);
+            probe.last = now;
+            if (probe.intervals.length >= 512 || now - probe.began >= 10000) {probe.active = false; return;}
+            probe.handle = requestAnimationFrame(frame);
+          };
+          probe.handle = requestAnimationFrame(frame);
+          return {started:true, max_intervals:512, max_ms:10000};
+        })()"#
+    } else {
+        r#"(() => {
+          const probe = globalThis.__omniterm_frames;
+          if (!probe) return {error:'not_started'};
+          probe.active = false; cancelAnimationFrame(probe.handle);
+          const result = {intervals_ms:probe.intervals, elapsed_ms:performance.now()-probe.began, visibility:document.visibilityState};
+          delete globalThis.__omniterm_frames; return result;
+        })()"#
+    };
+    protocol(
+        &window(app)?,
+        "Runtime.evaluate",
+        json!({"expression":expression,"returnByValue":true}),
+    )?
+    .pointer("/result/value")
+    .cloned()
+    .ok_or("observation_failed")
+}
+
 fn shortcut_guards(app: &tauri::AppHandle) -> Result<Value, &'static str> {
     let result = protocol(
         &window(app)?,
@@ -730,6 +770,26 @@ mod tests {
         assert!(validate_text(&"é".repeat(129)).is_err());
         assert!(validate_text("hidden\0value").is_err());
         assert!(validate_text("two\nlines").is_err());
+    }
+
+    #[test]
+    fn frame_probe_has_only_fixed_bounded_operations() {
+        let mut session =
+            Session::from_hello(format!(r#"{{"hello":"{TOKEN}"}}"#).as_bytes()).unwrap();
+        for command in [r#"{"begin_frames":{}}"#, r#"{"end_frames":{}}"#] {
+            assert!(session
+                .authorize(format!(r#"{{"token":"{TOKEN}","command":{command}}}"#).as_bytes())
+                .is_ok());
+        }
+        for command in [
+            r#"{"begin_frames":{"script":"bad"}}"#,
+            r#"{"begin_frames":{"max_ms":100000}}"#,
+            r#"{"end_frames":{"window":"other"}}"#,
+        ] {
+            assert!(session
+                .authorize(format!(r#"{{"token":"{TOKEN}","command":{command}}}"#).as_bytes())
+                .is_err());
+        }
     }
 
     #[test]
