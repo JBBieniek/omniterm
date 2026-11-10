@@ -110,3 +110,14 @@ test('idle workload signature detects unsolicited clicks, keys, camera, layout a
     const after=structuredClone(state);mutate(after);assert.notDeepEqual(idleSignature(after),before);
   }
 });
+
+test('terminal benchmark rejects partial navigation/input and short resource windows', async () => {
+  const result={result:'PASS',checks:Array(9).fill({result:'PASS'}),measurements:{history_navigation_ms:Array(20).fill(20),input_after_history_ms:Array(10).fill(100),live_snapshot_json_bytes:Array(20).fill(4096)}};
+  const read=async path=>path==='terminal/result.json'?result:counters();
+  const cases=await collectCases('terminal','full',read);
+  assert.deepEqual(cases.map(c=>c.id),['B-TERM-01','B-TERM-02','B-TERM-03','B-TERM-04']);
+  assert.equal(cases[0].metrics.latency_ms.n,20);
+  result.measurements.history_navigation_ms.pop();await assert.rejects(collectCases('terminal','full',read));
+  result.measurements.history_navigation_ms.push(20);
+  await assert.rejects(collectCases('terminal','full',async path=>path==='terminal/result.json'?result:{...counters(),duration_ms:14000}));
+});

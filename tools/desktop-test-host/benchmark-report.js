@@ -21,6 +21,10 @@ export const CASES = [
   ['B-PLACE-05','placement','first_fit: maximum 512x512 grid, 256 full-height strips, no fit'],
   ['B-PLACE-06','placement','place/validate_rect: accepted self-placement among 256 blocks'],
   ['B-PLACE-07','placement','place/validate_rect: collision with last of 256 blocks'],
+  ['B-TERM-01','terminal','20 older/newer captured-page transitions, controller request to observed page'],
+  ['B-TERM-02','terminal','10 input/output round trips after history selection and background output'],
+  ['B-TERM-03','terminal','15s owned tree window containing history/input/resize/recovery and idle; not continuous-load CPU'],
+  ['B-TERM-04','terminal','20 UTF-8 sizes of returned live ScreenSnapshot JSON representations; excludes invoke envelope/framing'],
 ].map(([id,group,workload]) => ({id,revision:1,group,workload}));
 
 function nonnegative(value) {assert(typeof value==='number'&&Number.isFinite(value)&&value>=0,'Expected a finite nonnegative number');return value;}
@@ -151,6 +155,15 @@ export async function collectCases(group,mode,read) {
       assert.equal(item.batch_mean_ns.length,12);assert(Number.isInteger(item.iterations_per_batch)&&item.iterations_per_batch>0);
       add(item.id,'placement.json',{batch_mean_ns:distribution(item.batch_mean_ns),iterations_per_batch:item.iterations_per_batch,blocks:item.blocks});
     }
+  }
+  if (group==='terminal'||group==='all') {
+    const result=await read('terminal/result.json');assert.equal(result.result,'PASS');
+    assert.equal(result.checks.length,9);assert(result.checks.every(c=>c.result==='PASS'));
+    add('B-TERM-01','terminal/result.json',timingMetrics(result.measurements.history_navigation_ms,20));
+    add('B-TERM-02','terminal/result.json',timingMetrics(result.measurements.input_after_history_ms,10));
+    add('B-TERM-03','terminal/resources.json',resourceMetrics(await read('terminal/resources.json'),15));
+    assert.equal(result.measurements.live_snapshot_json_bytes?.length,20);
+    add('B-TERM-04','terminal/result.json',{serialized_snapshot_bytes:distribution(result.measurements.live_snapshot_json_bytes)});
   }
   return cases;
 }

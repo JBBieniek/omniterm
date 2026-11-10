@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 export type CellRun = { column: number; width: number; text: string; fg: string; bg: string;
   bold: boolean; dim: boolean; italic: boolean; underline: boolean };
 export type Screen = { session_id: string; revision: string; rows: number; cols: number;
+  scrollback_rows: number; scrollback_offset: number; alternate_screen: boolean;
   cursor_row: number; cursor_col: number; cursor_visible: boolean; lines: CellRun[][];
   state: string; exit_code: number | null; raw_bytes: number; evicted_bytes: number;
   output_eof: boolean; read_failed: boolean; reply_dropped: boolean };
@@ -16,7 +17,4 @@ export function terminalCommand(command: Record<string, unknown>): Promise<Termi
   return invoke('terminal_command', new TextEncoder().encode(JSON.stringify({api_version: 1, command})));
 }
 
-export function fitTerminal(width: number, height: number, cellWidth: number) {
-  return {cols: Math.max(10, Math.min(120, Math.floor(width / cellWidth))),
-    rows: Math.max(2, Math.min(60, Math.floor(height / 20)))};
-}
+export {fitTerminal} from './terminal-view';

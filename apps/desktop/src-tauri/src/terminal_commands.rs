@@ -1,9 +1,19 @@
 use crate::commands::{decode, CommandError, WorkspaceHost};
 use crate::snapshot::{LayoutSnapshotV1, WireU64};
-use crate::terminal::{ScreenSnapshot, SessionSummary, TerminalHost};
+use crate::terminal::{ScreenSnapshot, SessionSummary, TerminalHost, SCROLLBACK_ROWS};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tauri::{ipc::InvokeBody, Manager};
+
+fn scrollback_offset<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u16, D::Error> {
+    let offset = u16::deserialize(deserializer)?;
+    if offset > SCROLLBACK_ROWS {
+        return Err(serde::de::Error::custom(
+            "History offset must be 0..200 rows.",
+        ));
+    }
+    Ok(offset)
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,6 +35,8 @@ enum Operation {
     Screen {
         session_id: WireU64,
         after: Option<WireU64>,
+        #[serde(default, deserialize_with = "scrollback_offset")]
+        scrollback: u16,
     },
     Text {
         session_id: WireU64,
@@ -121,9 +133,13 @@ pub fn dispatch(app: &tauri::AppHandle, body: &InvokeBody) -> Reply {
                 response.sessions = Some(runtime.list());
             }
             Operation::List => response.sessions = Some(runtime.list()),
-            Operation::Screen { session_id, after } => {
+            Operation::Screen {
+                session_id,
+                after,
+                scrollback,
+            } => {
                 response.screen = runtime
-                    .screen(session_id.into(), after)
+                    .screen_at(session_id.into(), after, scrollback)
                     .map_err(runtime_error)?
             }
             Operation::Text {
@@ -179,6 +195,10 @@ mod tests {
         for command in [
             r#"{"op":"screen","session_id":1}"#,
             r#"{"op":"screen","session_id":"01"}"#,
+            r#"{"op":"screen","session_id":"1","scrollback":201}"#,
+            r#"{"op":"screen","session_id":"1","scrollback":-1}"#,
+            r#"{"op":"screen","session_id":"1","scrollback":1.5}"#,
+            r#"{"op":"screen","session_id":"1","scrollback":"1"}"#,
             r#"{"op":"start","expected_revision":"0","program":"anything"}"#,
             r#"{"op":"resize","session_id":"1","rows":-1,"cols":80}"#,
             r#"{"op":"resize","session_id":"1","rows":24.5,"cols":80}"#,

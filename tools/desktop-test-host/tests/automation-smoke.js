@@ -23,6 +23,7 @@ const cameraCommands = [
   'shortcut_guards', {cancel_pan:{lost_capture:true}},
   'advance_layout', {key:{key:'resize_right'}},
   'request_close', {key:{key:'interrupt'}}, {paste:{text:'unauthorized'}},
+  {wheel:{x:10,y:10,delta:120}}, {key:{key:'history_up'}}, {key:{key:'select_all'}},
 ];
 try {
   if (mode === 'excluded') {
@@ -101,6 +102,8 @@ try {
     await writeFile(resolve(output, 'webview.png'), png);
     check('native_webview_screenshot', { bytes: png.length, width: png.readUInt32BE(16), height: png.readUInt32BE(20) });
     assert.deepEqual(await app.request({ click: { x: state.window.width, y: 0 } }), { error: 'point_outside_webview' });
+    assert.deepEqual(await app.request({wheel:{x:0,y:0,delta:241}}),{error:'invalid_wheel_delta'});
+    assert.deepEqual(await app.request({wheel:{x:state.window.width,y:0,delta:120}}),{error:'point_outside_webview'});
     assert.deepEqual(await app.request({ click: { x: 100, y: 100 } }, 'wrong'), { error: 'unauthorized' });
     assert.deepEqual(await app.request({ text: { text: 'unauthorized' } }, 'wrong'), { error: 'unauthorized' });
     for (const command of cameraCommands) assert.deepEqual(await app.request(command, 'wrong'), {error:'unauthorized'});

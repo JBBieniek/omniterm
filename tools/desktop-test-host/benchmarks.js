@@ -12,7 +12,7 @@ const root=resolve(dirname(fileURLToPath(import.meta.url)),'../..');
 const {values,positionals}=parseArgs({allowPositionals:true,options:Object.fromEntries(
   ['group','mode','out','host','app','git','powershell','baseline','build-profile','current'].map(key=>[key,{type:'string'}]))});
 const [command]=positionals;
-assert.equal(positionals.length,1,'Use: benchmarks.js list | run --out NEW_DIR --git GIT_EXE [--group all|production|workflow|placement] [--mode full|smoke] [--host EXE --app EXE --powershell EXE] [--baseline summary.json] | compare --current summary.json --baseline summary.json');
+assert.equal(positionals.length,1,'Use: benchmarks.js list | run --out NEW_DIR --git GIT_EXE [--group all|production|workflow|placement|terminal] [--mode full|smoke] [--host EXE --app EXE --powershell EXE] [--baseline summary.json] | compare --current summary.json --baseline summary.json');
 const json=async path=>JSON.parse((await readFile(path,'utf8')).replace(/^\uFEFF/,''));
 if (command==='list') {console.log(JSON.stringify({suite_revision:SUITE_REVISION,cases:CASES},null,2));}
 else if (command==='compare') {
@@ -24,14 +24,14 @@ else throw new Error('Unknown command: '+command);
 
 async function run() {
   const group=values.group??'all',mode=values.mode??'full',buildProfile=values['build-profile']??'release';
-  assert(['all','production','workflow','placement'].includes(group)&&['full','smoke'].includes(mode),'Unknown group/mode');
+  assert(['all','production','workflow','placement','terminal'].includes(group)&&['full','smoke'].includes(mode),'Unknown group/mode');
   assert(mode!=='smoke'||group==='workflow','Smoke is only a shortened workflow harness check');
   assert.equal(buildProfile,'release','Native binaries must be built with --release; placement uses the Cargo bench profile');
   assert(values.out&&values.git,'--out and --git are required');
-  const native=group!=='placement',workflow=group==='workflow'||group==='all',production=group==='production'||group==='all';
+  const native=group!=='placement',workflow=group==='workflow'||group==='all',production=group==='production'||group==='all',terminal=group==='terminal'||group==='all';
   assert(!native||process.platform==='win32','Native probes currently require Windows');
   assert(!native||values.powershell,'--powershell is required for native sampling');
-  assert(!workflow||values.host,'--host is required');assert(!production||values.app,'--app is required');
+  assert(!(workflow||terminal)||values.host,'--host is required');assert(!production||values.app,'--app is required');
   const out=resolve(values.out),git=resolve(values.git),powershell=values.powershell&&resolve(values.powershell);
   // Never reuse, overwrite or delete a previous run/profile, even after failure.
   await mkdir(out);
@@ -67,11 +67,12 @@ async function run() {
     const instruments=['benchmark-report.js','benchmarks.js'];
     if (native) instruments.push('client.js','src/automation.rs','tests/resource-probe.ps1');
     if (workflow) instruments.push('tests/evaluation-smoke.js');
+    if (terminal) instruments.push('tests/terminal-ux-smoke.js');
     if (production) instruments.push('tests/production-probe.ps1');
     evidence.conditions.instrumentation={};
     for (const path of instruments) evidence.conditions.instrumentation[path]=await hash(join(root,'tools/desktop-test-host',path));
     evidence.binaries={};
-    if (workflow) {evidence.binaries.host=await hash(resolve(values.host));evidence.binaries.helper=await hash(join(dirname(resolve(values.host)),'omni.exe'));}
+    if (workflow||terminal) {evidence.binaries.host=await hash(resolve(values.host));evidence.binaries.helper=await hash(join(dirname(resolve(values.host)),'omni.exe'));}
     if (production) evidence.binaries.app=await hash(resolve(values.app));
     if (native) {
       evidence.conditions.display=JSON.parse(await execute('display',powershell,['-NoProfile','-Command',
@@ -85,17 +86,22 @@ async function run() {
     }
     if (production) await execute('production',powershell,['-NoProfile','-ExecutionPolicy','Bypass','-File',join(root,'tools/desktop-test-host/tests/production-probe.ps1'),'-Binary',resolve(values.app),'-OutputDirectory',join(out,'production')]);
     if (workflow) await execute('workflow',process.execPath,[join(root,'tools/desktop-test-host/tests/evaluation-smoke.js'),resolve(values.host),join(out,'workflow'),git,mode,powershell]);
+    if (terminal) await execute('terminal',process.execPath,[join(root,'tools/desktop-test-host/tests/terminal-ux-smoke.js'),resolve(values.host),join(out,'terminal'),powershell]);
     evidence.cases=await collectCases(group,mode,path=>json(join(out,path)));
     if (native) {
       const resources=evidence.cases.filter(c=>c.metrics.webview_versions);
       evidence.conditions.tools.webview=[...new Set(resources.flatMap(c=>c.metrics.webview_versions))].sort();
       assert(evidence.conditions.tools.webview.length>0&&!evidence.conditions.tools.webview.includes('unavailable'),'Missing WebView runtime version');
       assert(resources.every(c=>c.metrics.webview_versions.length>0),'Missing WebView version in a workload');
-      const probe=await json(join(out,production?'production/idle.json':'workflow/empty-idle.json'));
+      const probe=await json(join(out,production?'production/idle.json':workflow?'workflow/empty-idle.json':'terminal/resources.json'));
       evidence.conditions.tools.sampler=probe.powershell_version;
       if (workflow) {
         const {width,height,scale_factor}= (await json(join(out,'workflow/three-view.json'))).window;
         evidence.conditions.workflow_window={width,height,scale_factor};
+      }
+      if (terminal) {
+        const {width,height,scale_factor}=(await json(join(out,'terminal/history-selected.json'))).window;
+        evidence.conditions.terminal_window={width,height,scale_factor};
       }
     }
     evidence.status='COLLECTED';

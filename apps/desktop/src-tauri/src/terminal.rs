@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 const CHUNK: usize = 4096;
 const RAW_LIMIT: usize = 256 * 1024;
 const MAX_SESSIONS: usize = 4;
+pub(crate) const SCROLLBACK_ROWS: u16 = 200;
 
 #[cfg(windows)]
 pub(crate) fn shell_directory(path: PathBuf) -> PathBuf {
@@ -182,6 +183,9 @@ pub struct ScreenSnapshot {
     revision: WireU64,
     pub rows: u16,
     pub cols: u16,
+    scrollback_rows: u16,
+    scrollback_offset: u16,
+    alternate_screen: bool,
     cursor_row: u16,
     cursor_col: u16,
     cursor_visible: bool,
@@ -236,7 +240,7 @@ impl TerminalState {
             parser: vt100::Parser::new_with_callbacks(
                 NonZeroU16::new(rows).unwrap(),
                 NonZeroU16::new(cols).unwrap(),
-                200,
+                usize::from(SCROLLBACK_ROWS),
                 Replies::default(),
             ),
             frames: VecDeque::new(),
@@ -347,7 +351,10 @@ impl TerminalState {
             cols: cols.get(),
             cursor_row,
             cursor_col,
-            cursor_visible: !screen.hide_cursor(),
+            cursor_visible: !screen.hide_cursor() && screen.scrollback() == 0,
+            scrollback_rows: screen.scrollback_len().min(usize::from(SCROLLBACK_ROWS)) as u16,
+            scrollback_offset: screen.scrollback().min(usize::from(SCROLLBACK_ROWS)) as u16,
+            alternate_screen: screen.alternate_screen(),
             lines,
             state: self.status(),
             exit_code: self.exit_code,
@@ -360,6 +367,16 @@ impl TerminalState {
             read_failed: self.read_failed,
             reply_dropped: self.reply_dropped,
         }
+    }
+
+    fn snapshot_at(&mut self, id: u64, offset: u16) -> ScreenSnapshot {
+        // The caller holds the Session state lock; no parser/input work can
+        // observe this presentation offset. Never copy the entire history.
+        let original = self.parser.screen().scrollback();
+        self.parser.screen_mut().set_scrollback(usize::from(offset));
+        let snapshot = self.snapshot(id);
+        self.parser.screen_mut().set_scrollback(original);
+        snapshot
     }
 }
 
@@ -426,13 +443,26 @@ impl TerminalHost {
         id: u64,
         after: Option<WireU64>,
     ) -> Result<Option<ScreenSnapshot>, &'static str> {
+        self.screen_at(id, after, 0)
+    }
+    pub fn screen_at(
+        &self,
+        id: u64,
+        after: Option<WireU64>,
+        offset: u16,
+    ) -> Result<Option<ScreenSnapshot>, &'static str> {
+        if offset > SCROLLBACK_ROWS {
+            return Err("History offset must be 0..200 rows.");
+        }
         let session = self.get(id)?;
-        let state = session.state.lock().unwrap();
-        Ok(if after.is_some_and(|v| u64::from(v) == state.revision) {
-            None
-        } else {
-            Some(state.snapshot(id))
-        })
+        let mut state = session.state.lock().unwrap();
+        Ok(
+            if offset == 0 && after.is_some_and(|v| u64::from(v) == state.revision) {
+                None
+            } else {
+                Some(state.snapshot_at(id, offset))
+            },
+        )
     }
     pub fn input(&self, id: u64, text: &str, paste: bool) -> Result<(), &'static str> {
         validate_text(text, paste)?;
@@ -816,6 +846,69 @@ impl TerminalHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_snapshots_are_view_local_and_preserve_live_processing() {
+        let mut state = TerminalState::new(3, 10);
+        state.process(b"zero\r\none\r\ntwo\r\nthree\r\nfour");
+        let live = state.snapshot(1);
+        let revision = state.revision;
+        let history = state.snapshot_at(1, 2);
+        let text = |snapshot: &ScreenSnapshot| {
+            snapshot
+                .lines
+                .iter()
+                .map(|line| {
+                    line.iter()
+                        .map(|r| r.text.as_str())
+                        .collect::<String>()
+                        .trim_end()
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(text(&live), ["two", "three", "four"]);
+        assert_eq!(text(&history), ["zero", "one", "two"]);
+        assert_eq!(history.scrollback_rows, 2);
+        assert_eq!(history.scrollback_offset, 2);
+        assert!(!history.cursor_visible);
+        assert_eq!(state.revision, revision);
+        assert_eq!(state.parser.screen().scrollback(), 0);
+        assert_eq!(text(&state.snapshot(1)), text(&live));
+        state.process(b"\r\nfive");
+        assert_eq!(text(&state.snapshot(1)), ["three", "four", "five"]);
+    }
+
+    #[test]
+    fn history_is_bounded_and_alternate_screen_is_independent() {
+        let mut state = TerminalState::new(3, 20);
+        for i in 0..300 {
+            state.process(format!("LINE_{i:03}\r\n").as_bytes());
+        }
+        let history = state.snapshot_at(1, 200);
+        assert_eq!(history.scrollback_rows, 200);
+        assert_eq!(history.scrollback_offset, 200);
+        assert!(!history
+            .lines
+            .iter()
+            .flatten()
+            .any(|r| r.text.contains("LINE_000")));
+        state.process(b"\x1b[?1049hALT");
+        let alternate = state.snapshot_at(1, 200);
+        assert!(alternate.alternate_screen);
+        assert_eq!(alternate.scrollback_rows, 0);
+        assert_eq!(alternate.scrollback_offset, 0);
+        assert!(alternate.lines[0].iter().any(|r| r.text.contains("ALT")));
+        state.process(b"\x1b[?1049l");
+        assert_eq!(state.snapshot_at(1, 200).scrollback_rows, 200);
+        assert_eq!(state.parser.screen().scrollback(), 0);
+        assert_eq!(
+            TerminalHost::new(PathBuf::from("."))
+                .screen_at(99, None, 201)
+                .err(),
+            Some("History offset must be 0..200 rows.")
+        );
+    }
 
     #[cfg(windows)]
     #[test]

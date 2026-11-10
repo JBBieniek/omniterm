@@ -26,6 +26,11 @@ enum Command {
         x: u32,
         y: u32,
     },
+    Wheel {
+        x: u32,
+        y: u32,
+        delta: i32,
+    },
     Pointer {
         phase: PointerPhase,
         button: PointerButton,
@@ -76,6 +81,12 @@ enum Key {
     ResizeRight,
     ResizeUp,
     ResizeDown,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+    HistoryUp,
+    SelectAll,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -222,6 +233,7 @@ fn serve(
             Command::BeginFrames {} => reply(output, frames(app, true))?,
             Command::EndFrames {} => reply(output, frames(app, false))?,
             Command::Click { x, y } => reply(output, click(app, x, y))?,
+            Command::Wheel { x, y, delta } => reply(output, wheel(app, x, y, delta))?,
             Command::Pointer {
                 phase,
                 button,
@@ -331,6 +343,16 @@ const OBSERVE: &str = r#"(async () => {
     session_id: element.dataset.sessionId, state: element.dataset.terminalState,
     rows: Number(element.dataset.terminalRows), cols: Number(element.dataset.terminalCols),
     input: bounds(element.querySelector('textarea')),
+    reading:element.dataset.terminalReading === 'true', focused:element.dataset.terminalFocused === 'true',
+    view_ready:element.dataset.terminalViewReady === 'true',
+    history_offset:Number(element.dataset.scrollbackOffset), history_rows:Number(element.dataset.scrollbackRows),
+    read:bounds(element.querySelector('[data-testid="read-terminal"]')),
+    older:bounds(element.querySelector('[data-testid="older-terminal"]')),
+    newer:bounds(element.querySelector('[data-testid="newer-terminal"]')),
+    live:bounds(element.querySelector('[data-testid="live-terminal"]')),
+    reading_surface:bounds(element.querySelector('[data-testid="terminal-reading"]')),
+    reading_text:element.querySelector('[data-testid="terminal-reading"]')?.textContent?.slice(0,16384) ?? null,
+    selection_length:element.querySelector('[data-testid="terminal-reading"]')?.contains(window.getSelection()?.anchorNode) ? window.getSelection().toString().length : 0,
     text: [...element.querySelectorAll('.terminal-row')].map(row => row.textContent).join('\n'),
     status: element.querySelector('.terminal-status')?.textContent,
     error: element.querySelector('.terminal-error')?.textContent ?? ''
@@ -481,12 +503,41 @@ fn click(app: &tauri::AppHandle, x: u32, y: u32) -> Result<Value, &'static str> 
     Ok(json!({ "clicked": true }))
 }
 
+fn validate_wheel(delta: i32) -> Result<(), &'static str> {
+    if delta == 0 || delta.unsigned_abs() > 240 {
+        return Err("invalid_wheel_delta");
+    }
+    Ok(())
+}
+
+fn wheel(app: &tauri::AppHandle, x: u32, y: u32, delta: i32) -> Result<Value, &'static str> {
+    validate_wheel(delta)?;
+    let window = window(app)?;
+    let size = window
+        .inner_size()
+        .map_err(|_| "window_unavailable")?
+        .to_logical::<f64>(window.scale_factor().map_err(|_| "window_unavailable")?);
+    validate_point(x, y, size.width, size.height)?;
+    protocol(
+        &window,
+        "Input.dispatchMouseEvent",
+        json!({"type":"mouseWheel","x":x,"y":y,"deltaX":0,"deltaY":delta}),
+    )?;
+    Ok(json!({"wheel_sent":true}))
+}
+
 fn key_event(app: &tauri::AppHandle, key: Key) -> Result<Value, &'static str> {
     let window = window(app)?;
     let (name, code, virtual_key, modifiers, location) = match key {
         Key::Tab => ("Tab", "Tab", 9, 0, 0),
         Key::Enter => ("Enter", "Enter", 13, 0, 0),
         Key::Escape => ("Escape", "Escape", 27, 0, 0),
+        Key::PageUp => ("PageUp", "PageUp", 33, 0, 0),
+        Key::PageDown => ("PageDown", "PageDown", 34, 0, 0),
+        Key::Home => ("Home", "Home", 36, 0, 0),
+        Key::End => ("End", "End", 35, 0, 0),
+        Key::HistoryUp => ("PageUp", "PageUp", 33, 8, 0),
+        Key::SelectAll => ("a", "KeyA", 65, 2, 0),
         Key::Interrupt => ("c", "KeyC", 67, 2, 0),
         Key::ZoomIn => ("=", "Equal", 187, 2, 0),
         Key::ZoomPlus => ("+", "Equal", 187, 10, 0),
@@ -720,6 +771,21 @@ fn protocol(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_navigation_has_fixed_keys_and_bounded_wheel_input() {
+        for delta in [-240, -1, 1, 240] {
+            assert!(validate_wheel(delta).is_ok());
+        }
+        for delta in [0, -241, 241, i32::MIN, i32::MAX] {
+            assert!(validate_wheel(delta).is_err());
+        }
+        assert!(serde_json::from_str::<Command>(
+            r#"{"wheel":{"x":1,"y":1,"delta":120,"script":"bad"}}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<Command>(r#"{"key":{"key":"select_all"}}"#).is_ok());
+    }
     use std::io::Cursor;
 
     const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
