@@ -2,6 +2,17 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {CASES, collectCases, compareReports, distribution, frameMetrics, idleSignature, resourceMetrics, timingMetrics} from '../benchmark-report.js';
 
+test('child terminal benchmarks require all launches, input samples and owned resources', async () => {
+  const result={result:'PASS',checks:Array(10).fill({result:'PASS'}),measurements:{child_launch_ms:[100,110,120],child_input_ms:Array(10).fill(100)}};
+  const read=async path=>path==='child/result.json'?result:counters();
+  const cases=await collectCases('child','full',read);
+  assert.deepEqual(cases.map(c=>c.id),['B-CHILD-01','B-CHILD-02','B-CHILD-03']);
+  assert.equal(cases[0].metrics.latency_ms.n,3);
+  result.measurements.child_launch_ms.pop();await assert.rejects(collectCases('child','full',read));
+  result.measurements.child_launch_ms.push(120);result.measurements.child_input_ms.pop();
+  await assert.rejects(collectCases('child','full',read));
+});
+
 function counters() {
   const processes = cpu => [
     {id:1,start_ticks:'100',name:'omniterm-test-host',file_version:'1',cpu_seconds:cpu,private_bytes:1048576,working_set_bytes:2097152},

@@ -190,6 +190,8 @@
 
   function selectBlock(id: string) {
     if (snapshot?.blocks.some(block => block.id === id)) selectedId = id;
+    const session = snapshot?.blocks.find(block => block.id === id)?.session_id;
+    if (session) sessionId = session;
   }
 
   async function mutate(command: 'add_placeholder' | 'remove_placement' | 'place_block',
@@ -236,7 +238,8 @@
   async function openedText(id: string) {
     try {
       reconcile(await invoke<LayoutSnapshotV1>('get_layout_snapshot'));
-      if (snapshot?.blocks.some(block => block.id === id && (block.text || block.git_task_id))) openedId = id;
+      if (snapshot?.blocks.some(block => block.id === id && (block.text || block.git_task_id || block.session_id))) openedId = id;
+      void refreshSessions();
       void refreshGit();
     } catch { error = 'A file was opened, but the board could not refresh; reload the workspace.'; needsReload = true; }
   }
@@ -266,14 +269,14 @@
     finally { pending = false; }
   }
 
-  async function terminalAction(op: 'start' | 'reopen' | 'terminate' | 'quit') {
+  async function terminalAction(op: 'start' | 'reopen' | 'terminate' | 'quit', target = sessionId) {
     if (pending || !snapshot || (needsReload && op !== 'quit')) return;
     pending = true;
     error = '';
     try {
       const result = await terminalCommand({op, ...(op === 'start' || op === 'reopen'
         ? {expected_revision: snapshot.revision} : {}),
-        ...(op === 'reopen' || op === 'terminate' ? {session_id: sessionId} : {})});
+        ...(op === 'reopen' || op === 'terminate' ? {session_id: target} : {})});
       if (result.status === 'error') {
         error = result.error.message;
         // Reconcile a rejected placement without ever retrying a process start.
@@ -342,7 +345,7 @@
       <div class="session-controls" aria-label="Session controls">
         <label for="session">Session</label>
         <select id="session" data-testid="session-select" bind:value={sessionId} disabled={unavailable}>
-          {#each sessions as session}<option value={session.session_id}>#{session.session_id} · {session.state}</option>{/each}
+          {#each sessions as session}<option value={session.session_id}>#{session.session_id}{session.parent_session_id ? ` ← #${session.parent_session_id}` : ''} · {session.state}</option>{/each}
         </select>
         <button type="button" data-testid="reopen-terminal" disabled={unavailable || !sessionId}
           onclick={() => terminalAction('reopen')}>Show terminal</button>
@@ -394,7 +397,9 @@
                 <span>Placeholder</span><span class="block-dimensions">{block.rect.width} × {block.rect.height} cells</span></span>
               {/if}
             </button>
-            {#if block.session_id}<TerminalView sessionId={block.session_id} onstate={refreshSessions} />{/if}
+            {#if block.session_id}<TerminalView sessionId={block.session_id}
+              parentSessionId={sessions.find(s => s.session_id === block.session_id)?.parent_session_id ?? null}
+              onparent={(id) => terminalAction('reopen',id)} onstate={refreshSessions} />{/if}
             {#if block.text}<TextView blockId={block.id} />{/if}
             {#if block.git_task_id}<GitView taskId={block.git_task_id} onrefresh={id => gitAction('refresh', id)} />{/if}
             <button type="button" class="resize-handle" data-resize-block={block.id} aria-describedby="layout-instructions"
@@ -416,6 +421,13 @@
   </main>
 
   <footer class="statusbar">
+    {#if sessions.length > 1}<div aria-label="Terminal shortcuts">
+      {#each sessions as session}<button type="button" data-reopen-session={session.session_id} disabled={unavailable}
+        onclick={() => terminalAction('reopen',session.session_id)}>Show #{session.session_id}{session.parent_session_id ? ` ← #${session.parent_session_id}` : ''}</button>{/each}
+    </div>{/if}
+    {#if snapshot?.blocks.some(block => block.id === openedId && block.session_id)}
+      <button type="button" data-testid="show-opened-terminal" onclick={showOpened}>Show attached terminal</button>
+    {/if}
     {#if gitRuns.length}<div class="git-retained" aria-label="Retained Git runs">Git runs:
       {#each gitRuns as run}<button type="button" data-reopen-git={run.task_id} disabled={unavailable}
         onclick={() => gitAction('reopen', run.task_id)}>Show #{run.task_id}</button>{/each}

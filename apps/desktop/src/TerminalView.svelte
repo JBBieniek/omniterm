@@ -5,7 +5,9 @@
   import type { Screen } from './terminal';
   import {historyKey, historyOffset, screenText, TERMINAL_LINE_HEIGHT} from './terminal-view';
 
-  let { sessionId, onstate }: {sessionId: string; onstate: () => void} = $props();
+  let { sessionId, parentSessionId, onparent, onstate }: {
+    sessionId: string; parentSessionId: string | null; onparent: (id: string) => void; onstate: () => void
+  } = $props();
   let screen = $state<Screen | null>(null);
   let error = $state('');
   let cellWidth = $state(8.5);
@@ -172,11 +174,13 @@
 </script>
 
 <div class="terminal" data-session-id={sessionId} data-terminal-state={sessionState}
+  data-parent-session-id={parentSessionId ?? ''}
   data-terminal-rows={screen?.rows ?? ''} data-terminal-cols={screen?.cols ?? ''}
   data-terminal-reading={reading} data-terminal-focused={focused} data-terminal-view-ready={applied === query}
   data-scrollback-offset={screen?.scrollback_offset ?? 0} data-scrollback-rows={screen?.scrollback_rows ?? 0}
   style:--terminal-row-height={`${TERMINAL_LINE_HEIGHT}px`}>
   <div class="terminal-tools" aria-label="Terminal view controls">
+    {#if parentSessionId}<button type="button" data-testid="parent-terminal" aria-label={`Show parent terminal ${parentSessionId}`} onclick={() => parentSessionId && onparent(parentSessionId)}>↖ #{parentSessionId}</button>{/if}
     <span class="terminal-mode"><span class:active={focused && !reading} class="terminal-dot"></span>{reading ? 'READING' : 'TERMINAL'}</span>
     <button type="button" data-testid="read-terminal" aria-pressed={reading} onclick={() => readPage()} disabled={!screen || composing}>Read / select</button>
     <button type="button" data-testid="older-terminal" aria-label="Older terminal output" disabled={!reading || offset >= (screen?.scrollback_rows ?? 0)} onclick={() => readPage(historyOffset(offset,(screen?.rows ?? 2)-1,screen?.scrollback_rows ?? 0))}>↑ Older</button>

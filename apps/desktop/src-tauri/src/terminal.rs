@@ -9,7 +9,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Write};
 use std::num::NonZeroU16;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -204,6 +204,7 @@ pub struct ScreenSnapshot {
 #[derive(Serialize)]
 pub struct SessionSummary {
     pub session_id: WireU64,
+    pub parent_session_id: Option<WireU64>,
     pub state: &'static str,
     exit_code: Option<u32>,
 }
@@ -387,6 +388,7 @@ struct Control {
     job: Option<windows_job::ProcessJob>,
 }
 struct Session {
+    parent_session_id: Option<u64>,
     state: Arc<Mutex<TerminalState>>,
     control: Arc<Mutex<Control>>,
     #[cfg(windows)]
@@ -432,6 +434,7 @@ impl TerminalHost {
                 let state = s.state.lock().unwrap();
                 SessionSummary {
                     session_id: (*id).into(),
+                    parent_session_id: s.parent_session_id.map(Into::into),
                     state: state.status(),
                     exit_code: state.exit_code,
                 }
@@ -599,18 +602,28 @@ impl TerminalHost {
     }
     #[cfg(windows)]
     pub fn start(&self) -> Result<u64, &'static str> {
-        self.start_inner(None)
+        self.start_inner(None, &self.cwd, None)
     }
     pub(crate) fn start_with_helper(&self, app: tauri::AppHandle) -> Result<u64, &'static str> {
         #[cfg(windows)]
         {
-            self.start_inner(Some(app))
+            self.start_inner(Some(app), &self.cwd, None)
         }
         #[cfg(not(windows))]
         {
             let _ = app;
             self.start()
         }
+    }
+    #[cfg(windows)]
+    pub(crate) fn start_child_with_helper(
+        &self,
+        app: tauri::AppHandle,
+        parent: u64,
+        source: &crate::open_call::windows::Root,
+    ) -> Result<u64, &'static str> {
+        source.verify()?;
+        self.start_inner(Some(app), source.path(), Some(parent))
     }
     #[cfg(windows)]
     pub(crate) fn with_open_access<T>(
@@ -638,10 +651,24 @@ impl TerminalHost {
         })
     }
     #[cfg(windows)]
-    fn start_inner(&self, app: Option<tauri::AppHandle>) -> Result<u64, &'static str> {
+    fn start_inner(
+        &self,
+        app: Option<tauri::AppHandle>,
+        cwd: &Path,
+        parent_session_id: Option<u64>,
+    ) -> Result<u64, &'static str> {
         let mut sessions = self.sessions.lock().unwrap();
         if sessions.closing {
             return Err("Terminal runtime is closing.");
+        }
+        if let Some(parent) = parent_session_id {
+            let parent = sessions
+                .entries
+                .get(&parent)
+                .ok_or("Parent Session does not exist.")?;
+            if parent.state.lock().unwrap().status() != "running" {
+                return Err("Parent Session is no longer running.");
+            }
         }
         if sessions.entries.len() >= MAX_SESSIONS {
             return Err("This pilot retains at most four Sessions; restart after stopping them to clear records.");
@@ -650,8 +677,7 @@ impl TerminalHost {
             .next_id
             .checked_add(1)
             .ok_or("Session ID limit reached.")?;
-        let cwd = self
-            .cwd
+        let cwd = cwd
             .canonicalize()
             .map_err(|_| "Shell working directory is unavailable.")?;
         let system =
@@ -831,6 +857,7 @@ impl TerminalHost {
         sessions.entries.insert(
             id,
             Arc::new(Session {
+                parent_session_id,
                 state,
                 control,
                 open_access,

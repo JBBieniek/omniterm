@@ -317,6 +317,7 @@ const OBSERVE: &str = r#"(async () => {
     new_terminal: control('new-terminal'), reopen: control('reopen-terminal'), terminate: control('terminate-session'),
     cancel_quit: control('cancel-quit'), confirm_quit: control('confirm-quit'),
     show_text: control('show-opened-text'),
+    show_terminal: control('show-opened-terminal'),
     show_git: control('show-opened-git'),
     pan: control('pan-tool'), zoom_in: control('zoom-in'), zoom_out: control('zoom-out'), reset: control('reset-view') },
   camera: matrix ? {zoom: matrix.a * 100, origin: {x: -matrix.e / matrix.a, y: -matrix.f / matrix.d}} : null,
@@ -339,8 +340,11 @@ const OBSERVE: &str = r#"(async () => {
     width: parseFloat(element.style.width), height: parseFloat(element.style.height),
     injected_elements: element.querySelectorAll('script,img,iframe,svg').length
   })),
+  session_views: [...document.querySelectorAll('[data-reopen-session]')].slice(0,4).map(element=>({session_id:element.dataset.reopenSession,control:bounds(element)})),
   terminals: [...document.querySelectorAll('[data-session-id]')].slice(0, 4).map(element => ({
     session_id: element.dataset.sessionId, state: element.dataset.terminalState,
+    parent_session_id:element.dataset.parentSessionId || null,
+    parent:bounds(element.querySelector('[data-testid="parent-terminal"]')),
     rows: Number(element.dataset.terminalRows), cols: Number(element.dataset.terminalCols),
     input: bounds(element.querySelector('textarea')),
     reading:element.dataset.terminalReading === 'true', focused:element.dataset.terminalFocused === 'true',

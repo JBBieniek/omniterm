@@ -7,7 +7,7 @@ export type Screen = { session_id: string; revision: string; rows: number; cols:
   cursor_row: number; cursor_col: number; cursor_visible: boolean; lines: CellRun[][];
   state: string; exit_code: number | null; raw_bytes: number; evicted_bytes: number;
   output_eof: boolean; read_failed: boolean; reply_dropped: boolean };
-export type Session = {session_id: string; state: string; exit_code: number | null};
+export type Session = {session_id: string; parent_session_id: string | null; state: string; exit_code: number | null};
 export type TerminalReply = {status: 'ok'; screen?: Screen; sessions?: Session[];
   layout?: import('./workspace').Layout; block_id?: string; session_id?: string}
   | {status: 'error'; error: {code: string; message: string}};

@@ -360,6 +360,32 @@ impl Server {
                     let bytes = receive(&self.pipe, Some(&self.access), MAX_REQUEST, 2000)?;
                     authorized?; // Drain a bounded frame before a denial, without parsing it.
                     let request = decode(&bytes)?;
+                    if matches!(request.op, super::Operation::Terminal) {
+                        let source = self.root.directory(&request.cwd)?;
+                        let (block_id, child) = runtime.with_open_access(session, pid, || {
+                            let workspace = app.state::<Mutex<crate::commands::WorkspaceHost>>();
+                            let mut workspace =
+                                workspace.lock().map_err(|_| "Workspace unavailable.")?;
+                            let revision = workspace.current_revision();
+                            workspace
+                                .check_content_room(revision)
+                                .map_err(|e| e.message)?;
+                            let child =
+                                runtime.start_child_with_helper(app.clone(), session, &source)?;
+                            match workspace.attach_terminal(child, revision) {
+                                Ok(block) => Ok((block, child)),
+                                Err(error) => {
+                                    let _ = runtime.terminate(child);
+                                    Err(error.message)
+                                }
+                            }
+                        })?;
+                        let _ = app.emit("layout-changed", block_id);
+                        return Ok(Reply::Terminal {
+                            block_id,
+                            session_id: child.into(),
+                        });
+                    }
                     if matches!(request.op, super::Operation::GitStatus) {
                         let source = self.root.directory(&request.cwd)?;
                         let (id, task_id) = runtime.with_open_access(session, pid, || {

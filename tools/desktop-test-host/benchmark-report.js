@@ -25,6 +25,9 @@ export const CASES = [
   ['B-TERM-02','terminal','10 input/output round trips after history selection and background output'],
   ['B-TERM-03','terminal','15s owned tree window containing history/input/resize/recovery and idle; not continuous-load CPU'],
   ['B-TERM-04','terminal','20 UTF-8 sizes of returned live ScreenSnapshot JSON representations; excludes invoke envelope/framing'],
+  ['B-CHILD-01','child','Three fixed-shell helper launch workflows to observed linked terminal: two, three, four retained Sessions; controller input/IPC/inspection included'],
+  ['B-CHILD-02','child','10 Enter requests to observed output in the separate child Session'],
+  ['B-CHILD-03','child','15s owned tree window starting with two Sessions, input/resize/helper/view recovery and idle; not idle-only or a scaling rate'],
 ].map(([id,group,workload]) => ({id,revision:1,group,workload}));
 
 function nonnegative(value) {assert(typeof value==='number'&&Number.isFinite(value)&&value>=0,'Expected a finite nonnegative number');return value;}
@@ -164,6 +167,13 @@ export async function collectCases(group,mode,read) {
     add('B-TERM-03','terminal/resources.json',resourceMetrics(await read('terminal/resources.json'),15));
     assert.equal(result.measurements.live_snapshot_json_bytes?.length,20);
     add('B-TERM-04','terminal/result.json',{serialized_snapshot_bytes:distribution(result.measurements.live_snapshot_json_bytes)});
+  }
+  if (group==='child'||group==='all') {
+    const result=await read('child/result.json');assert.equal(result.result,'PASS');
+    assert.equal(result.checks.length,10);assert(result.checks.every(c=>c.result==='PASS'));
+    add('B-CHILD-01','child/result.json',timingMetrics(result.measurements.child_launch_ms,3));
+    add('B-CHILD-02','child/result.json',timingMetrics(result.measurements.child_input_ms,10));
+    add('B-CHILD-03','child/resources.json',resourceMetrics(await read('child/resources.json'),15));
   }
   return cases;
 }

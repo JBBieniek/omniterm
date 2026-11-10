@@ -1,4 +1,4 @@
-//! One Session-scoped, bounded, inert text-open operation.
+//! Bounded cooperative operations authenticated to one live Session.
 
 #[cfg(windows)]
 pub(crate) mod windows;
@@ -24,6 +24,7 @@ pub(crate) struct Request {
 enum Operation {
     Open,
     GitStatus,
+    Terminal,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -46,6 +47,10 @@ pub(crate) enum Reply {
     Error {
         error: String,
     },
+    Terminal {
+        block_id: WireU64,
+        session_id: WireU64,
+    },
 }
 
 fn decode(bytes: &[u8]) -> Result<Request, &'static str> {
@@ -63,8 +68,8 @@ fn decode(bytes: &[u8]) -> Result<Request, &'static str> {
         Operation::Open if request.path.is_empty() => {
             return Err("Open needs a relative file path.")
         }
-        Operation::GitStatus if !request.path.is_empty() => {
-            return Err("Git status takes no path or arguments.")
+        Operation::GitStatus | Operation::Terminal if !request.path.is_empty() => {
+            return Err("This operation takes no path or arguments.")
         }
         _ => {}
     }
@@ -104,6 +109,8 @@ pub fn helper_main() -> Result<(), String> {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
     let (op, path) = if args.len() == 1 && args[0] == "git-status" {
         (Operation::GitStatus, "")
+    } else if args.len() == 1 && args[0] == "terminal" {
+        (Operation::Terminal, "")
     } else if args.len() == 2 && args[0] == "open" {
         let path = args[1]
             .to_str()
@@ -111,7 +118,7 @@ pub fn helper_main() -> Result<(), String> {
         relative_path(Path::new(path))?;
         (Operation::Open, path)
     } else {
-        return Err("Usage: omni open relative-file | omni git-status".into());
+        return Err("Usage: omni open relative-file | omni git-status | omni terminal".into());
     };
     let cwd = std::env::current_dir()
         .and_then(|p| p.canonicalize())
@@ -130,6 +137,17 @@ pub fn helper_main() -> Result<(), String> {
                 Ok(())
             }
             Reply::Error { error } => Err(error),
+            Reply::Terminal {
+                block_id,
+                session_id,
+            } => {
+                println!(
+                    "Started child terminal #{}; block #{}",
+                    u64::from(session_id),
+                    u64::from(block_id)
+                );
+                Ok(())
+            }
             Reply::Git { block_id, task } => {
                 use std::io::Write;
                 for frame in &task.frames {
@@ -175,6 +193,19 @@ pub fn helper_main() -> Result<(), String> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn child_terminal_request_is_fixed_and_cannot_claim_parent_or_program() {
+        assert!(decode(br#"{"api_version":1,"op":"terminal","cwd":"C:\\root"}"#).is_ok());
+        for request in [
+            br#"{"api_version":1,"op":"terminal","cwd":"x","path":"anything"}"#.as_slice(),
+            br#"{"api_version":1,"op":"terminal","cwd":"x","parent_session_id":"1"}"#,
+            br#"{"api_version":1,"op":"terminal","cwd":"x","program":"python"}"#,
+            br#"{"api_version":1,"op":"terminal","cwd":"x","args":[]}"#,
+        ] {
+            assert!(decode(request).is_err());
+        }
+    }
 
     #[test]
     fn request_is_strict_bounded_and_has_no_claimed_session_authority() {
