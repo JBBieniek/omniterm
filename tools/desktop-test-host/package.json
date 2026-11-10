@@ -6,6 +6,8 @@
   "scripts": {
     "build": "cargo build -p omniterm-test-host --locked --offline",
     "test": "node tests/automation-smoke.js",
-    "control": "node controller.js"
+    "control": "node controller.js",
+    "bench": "node benchmarks.js",
+    "test:bench": "node --test tests/benchmark-report.test.js"
   }
 }

@@ -10,7 +10,9 @@ $taskRootStart = $taskRoot.StartTime.ToUniversalTime().Ticks
 $taskLogical = [Environment]::ProcessorCount
 $taskClock = [Diagnostics.Stopwatch]::StartNew()
 $taskPrevious = @{}
+$taskVersions = @{}
 $taskLastMs = 0.0
+$taskFirstMs = 0.0
 $taskSamples = [Collections.Generic.List[object]]::new()
 for ($taskSample = 0; $taskSample -le $Seconds; $taskSample++) {
     $taskRoot.Refresh()
@@ -27,6 +29,7 @@ for ($taskSample = 0; $taskSample -le $Seconds; $taskSample++) {
         }
     } while ($taskAdded)
     $taskNowMs = $taskClock.Elapsed.TotalMilliseconds
+    if ($taskSample -eq 0) { $taskFirstMs = $taskNowMs }
     $taskProcesses = @()
     $taskCpuDelta = 0.0
     foreach ($taskOwnedId in $taskIds) {
@@ -38,7 +41,10 @@ for ($taskSample = 0; $taskSample -le $Seconds; $taskSample++) {
             $taskCpu = $taskProcess.TotalProcessorTime.TotalSeconds
             if ($taskPrevious.ContainsKey($taskIdentity)) { $taskCpuDelta += [Math]::Max(0.0, $taskCpu - $taskPrevious[$taskIdentity]) }
             $taskPrevious[$taskIdentity] = $taskCpu
-            $taskProcesses += [ordered]@{id=$taskOwnedId;start_ticks="$taskStart";name=$taskProcess.ProcessName;cpu_seconds=$taskCpu;private_bytes=$taskProcess.PrivateMemorySize64;working_set_bytes=$taskProcess.WorkingSet64}
+            if (!$taskVersions.ContainsKey($taskIdentity)) {
+                $taskVersions[$taskIdentity] = try { $taskProcess.MainModule.FileVersionInfo.FileVersion } catch { 'unavailable' }
+            }
+            $taskProcesses += [ordered]@{id=$taskOwnedId;start_ticks="$taskStart";name=$taskProcess.ProcessName;file_version=$taskVersions[$taskIdentity];cpu_seconds=$taskCpu;private_bytes=$taskProcess.PrivateMemorySize64;working_set_bytes=$taskProcess.WorkingSet64}
         } catch { $taskProcesses += [ordered]@{id=$taskOwnedId;unavailable=$true} }
     }
     $taskDeltaMs = $taskNowMs - $taskLastMs
@@ -52,7 +58,7 @@ for ($taskSample = 0; $taskSample -le $Seconds; $taskSample++) {
     $taskSamples.Add([ordered]@{elapsed_ms=$taskNowMs;cpu_one_core_percent=$taskCpuPercent;cpu_machine_percent=$taskCpuPercent/$taskLogical;private_bytes=$taskPrivate;working_set_sum_bytes=$taskWorking;processes=$taskProcesses})
     $taskLastMs = $taskNowMs
     if ($taskSample -lt $Seconds) {
-        $taskDelayMs = [Math]::Max(1,($taskSample+1)*1000 - $taskClock.Elapsed.TotalMilliseconds)
+        $taskDelayMs = [Math]::Max(1,$taskFirstMs+($taskSample+1)*1000 - $taskClock.Elapsed.TotalMilliseconds)
         Start-Sleep -Milliseconds ([int]$taskDelayMs)
     }
 }

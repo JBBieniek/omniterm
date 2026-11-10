@@ -5,6 +5,7 @@ import {mkdir,readFile,writeFile} from 'node:fs/promises';
 import {resolve,dirname,join} from 'node:path';
 import {performance} from 'node:perf_hooks';
 import {inspectReady,launchAutomation} from '../client.js';
+import {idleSignature,resourceMetrics} from '../benchmark-report.js';
 
 const [binaryArg,outputArg,gitArg,mode='full',powershellArg]=process.argv.slice(2);
 const smoke=mode==='smoke';
@@ -30,7 +31,18 @@ async function click(r){assert(r&&!r.disabled,JSON.stringify(r));const reply=awa
 async function key(key){const r=await app.request({key:{key}});assert(!r.error,JSON.stringify(r));}
 const terminal=s=>s.rendered.terminals[0];
 const screenText=s=>s.screens[0]?.lines.map(line=>line.map(run=>run.text).join('')).join('\n')??'';
-async function command(text,needle){const s=await until(s=>{const r=terminal(s)?.input,v=s.rendered.viewport;return r&&r.x>=v.x&&r.y>=v.y&&r.x<v.x+v.width&&r.y<v.y+v.height;});await click(terminal(s).input);assert(Buffer.byteLength(text)<=256);await app.request({text:{text}});const began=performance.now();await key('enter');if(needle)await until(s=>terminal(s)?.text.includes(needle));return performance.now()-began;}
+async function command(text,needle){
+ const s=await until(s=>{const r=terminal(s)?.input,v=s.rendered.viewport;return r&&r.x>=v.x&&r.y>=v.y&&r.x<v.x+v.width&&r.y<v.y+v.height;});
+ await click(terminal(s).input);const focused=await state();
+ const terminalId=focused.layout.blocks.find(b=>b.session_id===terminal(focused).session_id)?.id;
+ assert.equal(focused.rendered.active.block_id,terminalId,'Terminal click did not focus its Block');
+ assert.equal(focused.rendered.active.test_id,null,'Terminal click focused a workspace action');
+ assert(Buffer.byteLength(text)<=256);const inserted=await app.request({text:{text}});assert(!inserted.error,JSON.stringify(inserted));
+ const began=performance.now();await key('enter');const after=needle?await until(s=>terminal(s)?.text.includes(needle)):await state();
+ const elapsed=performance.now()-began;
+ (evidence.command_observations??=[]).push({index:evidence.command_observations?.length??0,git_tasks:after.git_tasks.map(t=>t.task_id),focused_block:focused.rendered.active.block_id});
+ assert(after.git_tasks.length<=1,'Unexpected extra Git Task after terminal command');return elapsed;
+}
 async function layoutKey(id,which){let s=await state();const before=s.layout.revision;await click(s.rendered.blocks.find(b=>b.id===id).header);await key(which);return until(s=>s.layout.revision!==before);}
 async function shot(name){const r=await app.request('screenshot');assert(!r.error);await writeFile(join(output,name+'.png'),Buffer.from(r.result.data,'base64'));await writeFile(join(output,name+'.json'),JSON.stringify(await state(),null,2));}
 function sampleResources(name,seconds=60){
@@ -40,15 +52,14 @@ function sampleResources(name,seconds=60){
  return {closed};
 }
 function validateCounters(result){
- const previous=new Map();let last=0;
- for(const [index,sample] of result.samples.entries()){
-   let cpu=0,privateBytes=0,workingSet=0;
-   for(const p of sample.processes){if(p.unavailable)continue;const id=p.id+'/'+p.start_ticks;if(previous.has(id))cpu+=Math.max(0,p.cpu_seconds-previous.get(id));previous.set(id,p.cpu_seconds);privateBytes+=p.private_bytes;workingSet+=p.working_set_bytes;}
-   assert.equal(sample.private_bytes,privateBytes);assert.equal(sample.working_set_sum_bytes,workingSet);
-   const expected=index?100000*cpu/(sample.elapsed_ms-last):0;assert(Math.abs(sample.cpu_one_core_percent-expected)<0.000001,'CPU totals must agree with unrounded raw counters');last=sample.elapsed_ms;
- }
+ resourceMetrics(result,0);
 }
-async function idle(name){const seconds=smoke?1:60;console.log('Measuring '+name+' for '+seconds+' seconds');const probe=sampleResources(name,seconds);return probe.closed;}
+async function idle(name){
+ const seconds=smoke?1:60,before=idleSignature(await state());
+ console.log('Measuring '+name+' for '+seconds+' seconds');const result=await sampleResources(name,seconds).closed;
+ const after=idleSignature(await state());(evidence.idle_observations??=[]).push({name,before,after});
+ assert.deepEqual(after,before,'Idle benchmark workload changed; reject this disturbed run');return result;
+}
 async function framesBegin(){assert.deepEqual((await app.request({begin_frames:{}})).result,{started:true,max_intervals:512,max_ms:10000});}
 async function framesEnd(name){const r=await app.request({end_frames:{}});assert(!r.error);assert(r.result.intervals_ms.length>5&&r.result.intervals_ms.length<=512);await writeFile(join(output,name+'.json'),JSON.stringify(r.result,null,2));return r.result;}
 try {
@@ -91,5 +102,5 @@ try {
  await app.request('request_close');s=await until(s=>s.rendered.quit_dialog);await click(s.rendered.controls.cancel_quit);await until(s=>!s.rendered.quit_dialog&&s.sessions[0].state==='running');
  await app.request('close');assert.equal((await app.closed).code,0);app=null;check('combined_demo_quit_cancel_and_owned_shutdown');
  evidence.result='PASS';console.log('PASS: '+evidence.checks.length+' combined workflow checks');
-} catch(error){evidence.result='FAIL';evidence.failure=String(error);throw error;}
+} catch(error){evidence.result='FAIL';evidence.failure=String(error);if(app){try{await shot('failure');}catch(snapshotError){evidence.failure_snapshot_error=String(snapshotError);}}throw error;}
 finally{process.env.PATH=oldPath;if(oldProfile===undefined)delete process.env.WEBVIEW2_USER_DATA_FOLDER;else process.env.WEBVIEW2_USER_DATA_FOLDER=oldProfile;if(app&&app.child.exitCode===null)await app.stop();evidence.finished=new Date().toISOString();await writeFile(join(output,'result.json'),JSON.stringify(evidence,null,2));}
