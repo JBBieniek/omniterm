@@ -377,6 +377,7 @@ const OBSERVE: &str = r#"(async () => {
   session_views: [...document.querySelectorAll('[data-reopen-session]')].slice(0,4).map(element=>({session_id:element.dataset.reopenSession,control:bounds(element)})),
   terminals: [...document.querySelectorAll('[data-session-id]')].slice(0, 4).map(element => ({
     session_id: element.dataset.sessionId, state: element.dataset.terminalState,
+    program:element.querySelector('.terminal-program')?.textContent?.slice(0,1024) ?? null,
     parent_session_id:element.dataset.parentSessionId || null,
     parent:bounds(element.querySelector('[data-testid="parent-terminal"]')),
     rows: Number(element.dataset.terminalRows), cols: Number(element.dataset.terminalCols),

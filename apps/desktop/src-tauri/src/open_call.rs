@@ -18,6 +18,8 @@ pub(crate) struct Request {
     cwd: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launch: Option<crate::terminal::ProgramLaunch>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,6 +66,12 @@ fn decode(bytes: &[u8]) -> Result<Request, &'static str> {
     if request.cwd.len() > 4096 || request.path.len() > 4096 {
         return Err("Open path exceeds 4096 UTF-8 bytes.");
     }
+    if let Some(launch) = &request.launch {
+        if !matches!(request.op, Operation::Terminal) {
+            return Err("Only terminal accepts a selected program.");
+        }
+        launch.validate()?;
+    }
     match request.op {
         Operation::Open if request.path.is_empty() => {
             return Err("Open needs a relative file path.")
@@ -107,9 +115,44 @@ fn text_bytes(bytes: &[u8]) -> Result<String, &'static str> {
 
 pub fn helper_main() -> Result<(), String> {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let mut launch = None;
     let (op, path) = if args.len() == 1 && args[0] == "git-status" {
         (Operation::GitStatus, "")
     } else if args.len() == 1 && args[0] == "terminal" {
+        (Operation::Terminal, "")
+    } else if args.len() >= 3 && args[0] == "terminal" && args[1] == "--" {
+        launch = Some(crate::terminal::ProgramLaunch {
+            program: args[2]
+                .to_str()
+                .ok_or("Executable must be valid Unicode.")?
+                .into(),
+            args: args[3..]
+                .iter()
+                .map(|arg| {
+                    arg.to_str()
+                        .map(str::to_owned)
+                        .ok_or("Arguments must be valid Unicode.")
+                })
+                .collect::<Result<_, _>>()?,
+        });
+        (Operation::Terminal, "")
+    } else if args.len() == 2 && args[0] == "terminal" && args[1] == "--json" {
+        use std::io::{IsTerminal, Read};
+        if std::io::stdin().is_terminal() {
+            return Err("Pipe UTF-8 program/args JSON into omni terminal --json.".into());
+        }
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .take((MAX_REQUEST + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "Could not read launch JSON.")?;
+        if bytes.len() > MAX_REQUEST {
+            return Err("Launch JSON exceeds 16 KiB.".into());
+        }
+        launch = Some(
+            serde_json::from_slice::<crate::terminal::ProgramLaunch>(&bytes)
+                .map_err(|_| "Invalid program/args launch JSON.")?,
+        );
         (Operation::Terminal, "")
     } else if args.len() == 2 && args[0] == "open" {
         let path = args[1]
@@ -118,8 +161,11 @@ pub fn helper_main() -> Result<(), String> {
         relative_path(Path::new(path))?;
         (Operation::Open, path)
     } else {
-        return Err("Usage: omni open relative-file | omni git-status | omni terminal".into());
+        return Err("Usage: omni open relative-file | omni git-status | omni terminal [-- EXE ARG... | --json]".into());
     };
+    if let Some(launch) = &launch {
+        launch.validate()?;
+    }
     let cwd = std::env::current_dir()
         .and_then(|p| p.canonicalize())
         .map_err(|_| "Could not resolve helper cwd.")?;
@@ -128,6 +174,7 @@ pub fn helper_main() -> Result<(), String> {
         op,
         cwd: cwd.to_str().ok_or("Cwd must be valid Unicode.")?.into(),
         path: path.into(),
+        launch,
     };
     #[cfg(windows)]
     {
@@ -193,6 +240,18 @@ pub fn helper_main() -> Result<(), String> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn launch_is_only_accepted_inside_terminal_and_cannot_choose_parent_or_environment() {
+        assert!(decode(br#"{"api_version":1,"op":"terminal","cwd":"x","launch":{"program":"C:\\python.exe","args":["-i",""]}}"#).is_ok());
+        for request in [
+            br#"{"api_version":1,"op":"open","cwd":"x","path":"a","launch":{"program":"C:\\a.exe"}}"#.as_slice(),
+            br#"{"api_version":1,"op":"git_status","cwd":"x","launch":{"program":"C:\\a.exe"}}"#,
+            br#"{"api_version":1,"op":"terminal","cwd":"x","launch":{"program":"relative.exe"}}"#,
+            br#"{"api_version":1,"op":"terminal","cwd":"x","launch":{"program":"C:\\a.exe","parent_session_id":"1"}}"#,
+            br#"{"api_version":1,"op":"terminal","cwd":"x","launch":{"program":"C:\\a.exe","args":["bad\u0000arg"]}}"#,
+        ] { assert!(decode(request).is_err()); }
+    }
 
     #[test]
     fn child_terminal_request_is_fixed_and_cannot_claim_parent_or_program() {

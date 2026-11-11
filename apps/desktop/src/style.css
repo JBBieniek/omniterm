@@ -72,6 +72,7 @@ select { font: inherit; color: inherit; background: var(--chrome); padding: 6px;
 .terminal-row { position: absolute; height: var(--terminal-row-height); left: 0; right: 0; }
 .terminal-row span { position: absolute; white-space: pre; height: var(--terminal-row-height); }
 .terminal-cursor { position: absolute; height: var(--terminal-row-height); border: 1px solid #b8cce4; opacity: .7; }
+.terminal-program { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .terminal[data-terminal-focused="true"] .terminal-cursor { background: #b8cce466; animation: terminal-blink 1.2s steps(1) infinite; }
 @keyframes terminal-blink { 50% { opacity: .15; } }
 @media (prefers-reduced-motion: reduce) { .terminal .terminal-cursor { animation: none; } }

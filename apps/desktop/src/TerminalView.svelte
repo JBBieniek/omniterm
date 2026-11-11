@@ -6,8 +6,8 @@
   import type { Screen, TerminalUpdate } from './terminal';
   import {historyKey, historyOffset, screenText, terminalRefresh, TERMINAL_LINE_HEIGHT} from './terminal-view';
 
-  let { sessionId, parentSessionId, onparent, onstate }: {
-    sessionId: string; parentSessionId: string | null; onparent: (id: string) => void; onstate: () => void
+  let { sessionId, parentSessionId, programName, onparent, onstate }: {
+    sessionId: string; parentSessionId: string | null; programName: string; onparent: (id: string) => void; onstate: () => void
   } = $props();
   let screen = $state<Screen | null>(null);
   let error = $state('');
@@ -224,6 +224,7 @@
     {/if}
   </div>
   <div class="terminal-status" role="status" data-testid="terminal-status">
+    <span class="terminal-program" title={programName}>{programName}</span>
     <span>#{sessionId} · {reading ? 'Captured page · ' : ''}{sessionState}{exitCode != null ? ` (${exitCode})` : ''}
     · {screen?.cols ?? '…'}×{screen?.rows ?? '…'}{reading ? ` · ${offset}/${screen?.scrollback_rows ?? 0} rows back` : focused ? ' · Input active' : ' · Click to type'}</span>
     <span class="terminal-hint">{reading ? 'Drag to select · Ctrl+C to copy · Esc to type' : 'Shift+PgUp to read · Ctrl+C to interrupt'}</span>

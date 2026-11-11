@@ -5,7 +5,7 @@ pub(crate) mod windows_job;
 
 use crate::snapshot::WireU64;
 use portable_pty::{CommandBuilder, MasterPty, PtySize};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Write};
 use std::num::NonZeroU16;
@@ -17,6 +17,38 @@ const CHUNK: usize = 4096;
 const RAW_LIMIT: usize = 256 * 1024;
 const MAX_SESSIONS: usize = 4;
 pub(crate) const SCROLLBACK_ROWS: u16 = 200;
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProgramLaunch {
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+impl ProgramLaunch {
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
+        let path = Path::new(&self.program);
+        if self.program.is_empty() || self.program.len() > 4096
+            || self.program.chars().any(char::is_control) || !path.is_absolute()
+            || !path.extension().is_some_and(|s| s.eq_ignore_ascii_case("exe"))
+            || path.components().any(|p| matches!(p, std::path::Component::ParentDir)
+                || matches!(p, std::path::Component::Normal(s) if s.to_string_lossy().contains(':')))
+        { return Err("Choose an absolute local .exe path without traversal, streams or control characters."); }
+        #[cfg(windows)]
+        if !matches!(path.components().next(), Some(std::path::Component::Prefix(p))
+            if matches!(p.kind(),std::path::Prefix::Disk(_)|std::path::Prefix::VerbatimDisk(_)))
+        {
+            return Err("Choose an executable on a local disk, not a network or device path.");
+        }
+        if self.args.len() > 64
+            || self.args.iter().any(|a| a.contains('\0'))
+            || self.program.len() + self.args.iter().map(String::len).sum::<usize>() > 8192
+        {
+            return Err("Use at most 64 arguments and 8192 UTF-8 bytes, without NUL characters.");
+        }
+        Ok(())
+    }
+}
 
 #[cfg(windows)]
 pub(crate) fn shell_directory(path: PathBuf) -> PathBuf {
@@ -207,6 +239,7 @@ pub struct ScreenSnapshot {
 pub struct SessionSummary {
     pub session_id: WireU64,
     pub parent_session_id: Option<WireU64>,
+    pub program: String,
     pub state: &'static str,
     exit_code: Option<u32>,
 }
@@ -430,6 +463,7 @@ struct Control {
 }
 struct Session {
     parent_session_id: Option<u64>,
+    program: String,
     state: Arc<Mutex<TerminalState>>,
     control: Arc<Mutex<Control>>,
     #[cfg(windows)]
@@ -476,6 +510,7 @@ impl TerminalHost {
                 SessionSummary {
                     session_id: (*id).into(),
                     parent_session_id: s.parent_session_id.map(Into::into),
+                    program: s.program.clone(),
                     state: state.status(),
                     exit_code: state.exit_code,
                 }
@@ -662,12 +697,12 @@ impl TerminalHost {
     }
     #[cfg(windows)]
     pub fn start(&self) -> Result<u64, &'static str> {
-        self.start_inner(None, &self.cwd, None)
+        self.start_inner(None, &self.cwd, None, None)
     }
     pub(crate) fn start_with_helper(&self, app: tauri::AppHandle) -> Result<u64, &'static str> {
         #[cfg(windows)]
         {
-            self.start_inner(Some(app), &self.cwd, None)
+            self.start_inner(Some(app), &self.cwd, None, None)
         }
         #[cfg(not(windows))]
         {
@@ -681,9 +716,10 @@ impl TerminalHost {
         app: tauri::AppHandle,
         parent: u64,
         source: &crate::open_call::windows::Root,
+        launch: Option<&ProgramLaunch>,
     ) -> Result<u64, &'static str> {
         source.verify()?;
-        self.start_inner(Some(app), source.path(), Some(parent))
+        self.start_inner(Some(app), source.path(), Some(parent), launch)
     }
     #[cfg(windows)]
     pub(crate) fn with_open_access<T>(
@@ -716,6 +752,7 @@ impl TerminalHost {
         app: Option<tauri::AppHandle>,
         cwd: &Path,
         parent_session_id: Option<u64>,
+        launch: Option<&ProgramLaunch>,
     ) -> Result<u64, &'static str> {
         let mut sessions = self.sessions.lock().unwrap();
         if sessions.closing {
@@ -743,8 +780,17 @@ impl TerminalHost {
         let system =
             std::env::var_os("SystemRoot").ok_or("Windows system directory is unavailable.")?;
         let shell = PathBuf::from(system).join("System32/WindowsPowerShell/v1.0/powershell.exe");
-        if !shell.is_file() || !cwd.is_dir() {
-            return Err("The system PowerShell executable or working directory is unavailable.");
+        let executable = launch
+            .map(|launch| {
+                launch.validate()?;
+                crate::open_call::windows::Executable::open(&launch.program)
+            })
+            .transpose()?;
+        let program = executable
+            .as_ref()
+            .map_or(shell.as_path(), |exe| exe.path());
+        if !program.is_file() || !cwd.is_dir() {
+            return Err("The selected executable or working directory is unavailable.");
         }
         let opening = if let Some(app) = app {
             let helper = std::env::current_exe()
@@ -764,8 +810,13 @@ impl TerminalHost {
                 pixel_height: 0,
             })
             .map_err(|_| "Could not create the native PTY.")?;
-        let mut command = CommandBuilder::new(shell);
-        command.args(["-NoLogo", "-NoProfile"]);
+        let program_name = program.file_name().unwrap().to_string_lossy().into_owned();
+        let mut command = CommandBuilder::new(program);
+        if let Some(launch) = launch {
+            command.args(&launch.args);
+        } else {
+            command.args(["-NoLogo", "-NoProfile"]);
+        }
         command.cwd(shell_directory(cwd));
         command.env_clear();
         for key in [
@@ -811,10 +862,13 @@ impl TerminalHost {
             .master
             .take_writer()
             .map_err(|_| "Could not open PTY input.")?;
+        if let Some(executable) = &executable {
+            executable.verify()?;
+        }
         let mut child = pair
             .slave
             .spawn_command(command)
-            .map_err(|_| "Could not start the system shell.")?;
+            .map_err(|_| "Could not start the selected program.")?;
         let job = match child
             .as_raw_handle()
             .ok_or(())
@@ -927,6 +981,7 @@ impl TerminalHost {
             id,
             Arc::new(Session {
                 parent_session_id,
+                program: program_name,
                 state: state.clone(),
                 control,
                 open_access,
@@ -990,6 +1045,49 @@ fn notify_updates(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_program_is_explicit_bounded_and_arguments_remain_literal() {
+        let launch: ProgramLaunch = serde_json::from_str(r#"{"program":"C:\\tools\\python.exe","args":["","a b","é界","a\"b","tail\\","|;&$()","line\nnext"]}"#).unwrap();
+        assert!(launch.validate().is_ok());
+        assert_eq!(launch.args[0], "");
+        assert_eq!(launch.args[3], "a\"b");
+        for program in [
+            "python",
+            "python.exe",
+            "C:python.exe",
+            r"\\server\python.exe",
+            r"C:\tools\run.cmd",
+            r"C:\tools\python.exe:stream",
+            r"C:\tools\..\python.exe",
+        ] {
+            assert!(
+                ProgramLaunch {
+                    program: program.into(),
+                    args: vec![]
+                }
+                .validate()
+                .is_err(),
+                "{program}"
+            );
+        }
+        for args in [
+            vec!["x".into(); 65],
+            vec!["x".repeat(8193)],
+            vec!["bad\0arg".into()],
+        ] {
+            assert!(ProgramLaunch {
+                program: r"C:\tools\python.exe".into(),
+                args
+            }
+            .validate()
+            .is_err());
+        }
+        assert!(serde_json::from_str::<ProgramLaunch>(
+            r#"{"program":"C:\\a.exe","args":[],"env":{}}"#
+        )
+        .is_err());
+    }
 
     #[test]
     fn changes_coalesce_without_signalling_view_reads_or_dropping_the_final_change() {

@@ -76,6 +76,13 @@ const report = value => ({schema:1,suite_revision:1,status:'COLLECTED',mode:'ful
   source:{commit:'abc',dirty:false},binaries:{host:'abc'},
   cases:[{id:'B-INPUT-01',revision:1,metrics:{latency_ms:{n:20,p50:value,p95:value+1,max:value+2}}}]});
 
+test('selected launch cases retain separate program observations and require complete input/resources', async()=>{
+  const result={result:'PASS',checks:Array(11).fill({result:'PASS'}),measurements:{fixture_launch_ms:[100],python_launch_ms:[200],fixture_input_ms:Array(10).fill(50)}};
+  const read=async path=>path==='launch/result.json'?result:counters();
+  assert.deepEqual((await collectCases('launch','full',read)).map(c=>c.id),['B-LAUNCH-01','B-LAUNCH-02','B-LAUNCH-03','B-LAUNCH-04']);
+  result.measurements.python_launch_ms=[];await assert.rejects(collectCases('launch','full',read));
+});
+
 test('idle controls require five stable full windows, request deltas and complete cold/input observations', async () => {
   const names=['empty','visible','focused','hidden','reading'];
   const result={result:'PASS',checks:Array(6).fill({result:'PASS'}),idle_observations:names.map(name=>({name,before:{revision:'1'},after:{revision:'1'},requests:{screen:0,list:0,other:0},elapsed_seconds:60})),

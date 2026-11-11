@@ -147,6 +147,55 @@ pub(crate) struct Root {
     path: PathBuf,
     ceiling: PathBuf,
 }
+
+pub(crate) struct Executable {
+    file: File,
+    path: PathBuf,
+}
+impl Executable {
+    pub(crate) fn open(program: &str) -> Result<Self, &'static str> {
+        let requested = Path::new(program);
+        if std::fs::symlink_metadata(requested)
+            .map_err(|_| "Executable is unavailable.")?
+            .file_attributes()
+            & FILE_ATTRIBUTE_REPARSE_POINT.0
+            != 0
+        {
+            return Err("Executable aliases/reparse points are not supported.");
+        }
+        let path = requested
+            .canonicalize()
+            .map_err(|_| "Executable is unavailable.")?;
+        if !matches!(path.components().next(),Some(Component::Prefix(p)) if matches!(p.kind(),Prefix::VerbatimDisk(_)|Prefix::Disk(_)))
+        {
+            return Err("Executable must be on a local disk.");
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ.0)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+            .open(&path)
+            .map_err(|_| "Could not pin the executable.")?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| "Executable metadata unavailable.")?;
+        if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+            return Err("Choose a regular executable file.");
+        }
+        let executable = Self { file, path };
+        executable.verify()?;
+        Ok(executable)
+    }
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+    pub(crate) fn verify(&self) -> Result<(), &'static str> {
+        if final_path(&self.file)? != self.path {
+            return Err("Executable moved during launch.");
+        }
+        Ok(())
+    }
+}
 impl Root {
     pub(crate) fn git_ceiling(&self) -> Result<PathBuf, &'static str> {
         let path = crate::terminal::shell_directory(self.ceiling.clone());
@@ -370,8 +419,12 @@ impl Server {
                             workspace
                                 .check_content_room(revision)
                                 .map_err(|e| e.message)?;
-                            let child =
-                                runtime.start_child_with_helper(app.clone(), session, &source)?;
+                            let child = runtime.start_child_with_helper(
+                                app.clone(),
+                                session,
+                                &source,
+                                request.launch.as_ref(),
+                            )?;
                             match workspace.attach_terminal(child, revision) {
                                 Ok(block) => Ok((block, child)),
                                 Err(error) => {
@@ -513,6 +566,22 @@ pub(crate) fn client(request: &Request) -> Result<Reply, String> {
 mod tests {
     use super::*;
     #[test]
+    fn executable_pin_rejects_directories_and_prevents_replacement_during_launch() {
+        let directory =
+            std::env::temp_dir().join(format!("omniterm-executable-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("selected.exe");
+        std::fs::write(&path, b"not executable code").unwrap();
+        let pinned = Executable::open(path.to_str().unwrap()).unwrap();
+        assert!(pinned.verify().is_ok());
+        assert!(std::fs::write(&path, b"replacement").is_err());
+        assert!(Executable::open(directory.to_str().unwrap()).is_err());
+        drop(pinned);
+        std::fs::write(&path, b"replacement").unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+    #[test]
     fn verified_file_read_uses_current_cwd_bounds_and_rejects_hard_links() {
         let temp = std::env::temp_dir().canonicalize().unwrap();
         let base = temp.join(format!(
@@ -538,6 +607,7 @@ mod tests {
             op: super::super::Operation::Open,
             cwd: cwd.canonicalize().unwrap().to_str().unwrap().into(),
             path: path.into(),
+            launch: None,
         };
         let document = root.read(&request(&sub, "./report.txt"), 7).unwrap();
         assert_eq!(document.text, "current é界 <img src=x>");

@@ -36,6 +36,10 @@ export const CASES = [
   ['B-UPDATES-01','idle','Test-host-only screen/list/other invoke deltas and rates for all five >=60s idle controls; no request contents retained'],
   ['B-COLD-01','idle','Two independent epoch-ms observations after >=60s quiet: external visible output and frozen-page exit; includes file/output/render/inspection'],
   ['B-INPUT-02','idle','10 Enter-to-rendered-output samples after the long-idle visible wake'],
+  ['B-LAUNCH-01','launch','One JSON-selected native fixture helper launch to rendered ready; argv/cwd/stdio/IPC included'],
+  ['B-LAUNCH-02','launch','One explicitly selected Python helper launch to rendered interactive prompt; different workload, not a language comparison'],
+  ['B-LAUNCH-03','launch','10 native fixture input requests to rendered reply observations'],
+  ['B-LAUNCH-04','launch','15s owned-tree mixed fixture/input/resize/helper/view/source-exit and idle window; no per-child or idle-only inference'],
 ].map(([id,group,workload]) => ({id,revision:1,group,workload}));
 
 function nonnegative(value) {assert(typeof value==='number'&&Number.isFinite(value)&&value>=0,'Expected a finite nonnegative number');return value;}
@@ -201,6 +205,14 @@ export async function collectCases(group,mode,read) {
     assert.equal(result.measurements.cold_output_ms?.length,2);
     add('B-COLD-01','idle/result.json',{visible_output_ms:nonnegative(result.measurements.cold_output_ms[0]),frozen_exit_ms:nonnegative(result.measurements.cold_output_ms[1])});
     add('B-INPUT-02','idle/result.json',timingMetrics(result.measurements.input_ms,10));
+  }
+  if (group==='launch'||group==='all') {
+    const result=await read('launch/result.json');assert.equal(result.result,'PASS');
+    assert.equal(result.checks.length,11);assert(result.checks.every(c=>c.result==='PASS'));
+    add('B-LAUNCH-01','launch/result.json',timingMetrics(result.measurements.fixture_launch_ms,1));
+    add('B-LAUNCH-02','launch/result.json',timingMetrics(result.measurements.python_launch_ms,1));
+    add('B-LAUNCH-03','launch/result.json',timingMetrics(result.measurements.fixture_input_ms,10));
+    add('B-LAUNCH-04','launch/resources.json',resourceMetrics(await read('launch/resources.json'),15));
   }
   return cases;
 }

@@ -354,7 +354,7 @@
       <div class="session-controls" aria-label="Session controls">
         <label for="session">Session</label>
         <select id="session" data-testid="session-select" bind:value={sessionId} disabled={unavailable}>
-          {#each sessions as session}<option value={session.session_id}>#{session.session_id}{session.parent_session_id ? ` ← #${session.parent_session_id}` : ''} · {session.state}</option>{/each}
+          {#each sessions as session}<option value={session.session_id}>#{session.session_id}{session.parent_session_id ? ` ← #${session.parent_session_id}` : ''} · {session.program} · {session.state}</option>{/each}
         </select>
         <button type="button" data-testid="reopen-terminal" disabled={unavailable || !sessionId}
           onclick={() => terminalAction('reopen')}>Show terminal</button>
@@ -407,6 +407,7 @@
               {/if}
             </button>
             {#if block.session_id}<TerminalView sessionId={block.session_id}
+              programName={sessions.find(s => s.session_id === block.session_id)?.program ?? 'Terminal'}
               parentSessionId={sessions.find(s => s.session_id === block.session_id)?.parent_session_id ?? null}
               onparent={(id) => terminalAction('reopen',id)} onstate={refreshSessions} />{/if}
             {#if block.text}<TextView blockId={block.id} />{/if}
